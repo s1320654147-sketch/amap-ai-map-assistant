@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: amap-ai-map-assistant
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: AMAP_KEY
+        sync: false
+      - key: AMAP_JS_KEY
+        sync: false
+      - key: AMAP_SECURITY_JS_CODE
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_TIMEOUT_MS
+        value: "12000"
+      - key: AMAP_TIMEOUT_MS
+        value: "18000"
+      - key: AMAP_MIN_INTERVAL_MS
+        value: "350"

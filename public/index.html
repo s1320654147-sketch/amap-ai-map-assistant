@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>高德 AI 地图助手</title>
+    <link rel="stylesheet" href="/styles.css?v=20260623-brandlogos" />
+  </head>
+  <body>
+    <main class="main-dashboard-layout">
+      <section class="left-side-panel chat-column">
+        <nav class="rail" aria-label="主导航">
+          <div class="rail-logo">AI</div>
+          <button class="rail-item active" type="button"><span>⌁</span><em>对话</em></button>
+          <button class="rail-item" type="button"><span>◌</span><em>搜索</em></button>
+          <button class="rail-item" type="button"><span>☆</span><em>收藏</em></button>
+          <button class="rail-item" type="button"><span>▣</span><em>分析</em></button>
+          <button class="rail-item" type="button"><span>⚙</span><em>设置</em></button>
+          <div class="rail-spacer"></div>
+          <button class="profile-dot" type="button" aria-label="个人中心"></button>
+        </nav>
+
+        <div class="left-panel-content">
+          <header class="chat-header">
+            <div class="chat-header-main">
+              <div class="brand-joint-badge">
+                <div class="brand-item ds-brand">
+                  <img class="brand-icon brand-icon-deepseek" src="/assets/deepseek-logo.png" alt="" aria-hidden="true" />
+                  <span>DeepSeek</span>
+                </div>
+                <div class="brand-divider"></div>
+                <div class="brand-item amap-brand">
+                  <img class="brand-icon brand-icon-amap" src="/assets/amap-logo.png" alt="" aria-hidden="true" />
+                  <span>高德地图</span>
+                </div>
+              </div>
+              <div class="brand-subtitle">AI 智能地理助手</div>
+              <h1>AI 地图助手</h1>
+            </div>
+          </header>
+
+          <section class="ask-card input-card-container" id="heroAskCard">
+            <span class="engine-powered-tag">⚡ DeepSeek 模型驱动 ｜ 📍 高德数据实况</span>
+            <div class="context-bar" id="contextBar">
+              <span class="context-text">当前上下文：未锁定地点</span>
+              <button class="context-reset" id="contextResetButton" type="button">重置</button>
+            </div>
+            <form id="agentForm" class="ask-form">
+              <textarea
+                id="questionInput"
+                name="question"
+                rows="2"
+                placeholder="输入你的地点问题，或用自然语言描述需求"
+              ></textarea>
+              <button class="send-fab" type="submit" aria-label="发送">➤</button>
+            </form>
+            <div class="quick-prompts" id="quickPrompts"></div>
+            <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么电影院？”</div>
+          </section>
+
+          <section class="chat-stream">
+            <div class="context-banner" id="contextBanner">
+              <span class="context-banner-icon">⌁</span>
+              <span class="context-banner-text">当前搜索范围：未锁定地点</span>
+              <button class="context-reset context-reset-banner" id="contextResetBannerButton" type="button">重置</button>
+            </div>
+            <section class="conversation" id="conversation" aria-live="polite"></section>
+          </section>
+
+          <footer class="chat-input" id="followupInputBar">
+            <input id="inlineQuestion" type="text" placeholder="继续提问..." />
+            <button id="inlineSend" type="button">➤</button>
+          </footer>
+        </div>
+      </section>
+
+      <section class="right-map-container map-column">
+        <div class="map-toolbar"></div>
+        <section class="map-wrap">
+          <div id="map" class="map"></div>
+          <div class="scale-chip">200 m</div>
+        </section>
+        <section class="evidence-table">
+          <header class="table-header">
+            <h2 id="mapTitle">📍 我的周边</h2>
+            <div class="table-tabs"><span>距离</span><span>评分</span><span>来源</span></div>
+          </header>
+          <div id="evidence" class="evidence-list">
+            <p class="empty">定位后会自动展示您真实附近的商铺或地标。</p>
+          </div>
+          <button class="more-button" type="button">查看更多</button>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js?v=20260623-tworeplies" type="module"></script>
+  </body>
+</html>

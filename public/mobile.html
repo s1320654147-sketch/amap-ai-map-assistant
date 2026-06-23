@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>高德 AI 地图助手 - Mobile</title>
+    <link rel="stylesheet" href="/styles.css?v=20260623-brandlogos" />
+  </head>
+  <body class="mobile-page">
+    <main class="mobile-shell">
+      <header class="mobile-top">
+        <div class="mobile-brand-block">
+          <div class="brand-joint-badge">
+            <div class="brand-item ds-brand">
+              <img class="brand-icon brand-icon-deepseek" src="/assets/deepseek-logo.png" alt="" aria-hidden="true" />
+              <span>DeepSeek</span>
+            </div>
+            <div class="brand-divider"></div>
+            <div class="brand-item amap-brand">
+              <img class="brand-icon brand-icon-amap" src="/assets/amap-logo.png" alt="" aria-hidden="true" />
+              <span>高德地图</span>
+            </div>
+          </div>
+          <div class="brand-subtitle">AI 智能地理助手</div>
+          <h1>AI 地图助手</h1>
+        </div>
+        <span id="status">在线</span>
+      </header>
+
+      <section class="mobile-ask input-card-container" id="heroAskCard">
+        <span class="engine-powered-tag">⚡ DeepSeek 模型驱动 ｜ 📍 高德数据实况</span>
+        <div class="context-bar mobile-context" id="contextBar">
+          <span class="context-text">当前上下文：未锁定地点</span>
+          <button class="context-reset" id="contextResetButton" type="button">重置</button>
+        </div>
+        <form id="agentForm" class="ask-form">
+          <textarea id="questionInput" name="question" rows="2" placeholder="输入你的地点问题"></textarea>
+          <button class="send-fab" type="submit" aria-label="发送">➤</button>
+        </form>
+        <div class="quick-prompts" id="quickPrompts"></div>
+        <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么电影院？”</div>
+      </section>
+
+      <section class="mobile-map-card">
+        <div class="mobile-map-head">
+          <h2>地图参考</h2>
+          <button id="fitMapButton" type="button">适配</button>
+        </div>
+        <div id="map" class="map"></div>
+      </section>
+
+      <section class="mobile-chat">
+        <div class="mobile-section-head">
+          <h2>对话</h2>
+          <span id="plannerBadge">DeepSeek 解析</span>
+        </div>
+        <div class="context-banner mobile-context-banner" id="contextBanner">
+          <span class="context-banner-icon">⌁</span>
+          <span class="context-banner-text">当前搜索范围：未锁定地点</span>
+          <button class="context-reset context-reset-banner" id="contextResetBannerButton" type="button">重置</button>
+        </div>
+        <div class="conversation" id="conversation" aria-live="polite"></div>
+      </section>
+
+      <section class="mobile-evidence">
+        <div class="table-header">
+          <h2 id="mapTitle">📍 我的周边</h2>
+          <div class="table-tabs"><span>距离</span><span>评分</span><span>来源</span></div>
+        </div>
+        <div id="evidence" class="evidence-list">
+          <p class="empty">定位后会自动展示您真实附近的商铺或地标。</p>
+        </div>
+      </section>
+
+      <footer class="chat-input" id="followupInputBar">
+        <input id="inlineQuestion" type="text" placeholder="继续提问..." />
+        <button id="inlineSend" type="button">➤</button>
+      </footer>
+    </main>
+
+    <script src="/app.js?v=20260623-tworeplies" type="module"></script>
+  </body>
+</html>

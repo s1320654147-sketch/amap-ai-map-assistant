@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>高德 AI 地图问答 - 纯 HTML Demo</title>
+    <style>
+      :root {
+        --bg: #eef3f1;
+        --panel: #fff;
+        --soft: #f7faf9;
+        --ink: #18211f;
+        --muted: #66746f;
+        --line: #d8e2df;
+        --teal: #126d63;
+        --amber: #c4663e;
+        --shadow: 0 24px 70px rgba(31, 46, 42, 0.14);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: var(--ink);
+        background:
+          linear-gradient(90deg, rgba(18, 109, 99, 0.055) 1px, transparent 1px),
+          linear-gradient(rgba(18, 109, 99, 0.055) 1px, transparent 1px),
+          var(--bg);
+        background-size: 34px 34px;
+      }
+      button, textarea { font: inherit; }
+      button { cursor: pointer; }
+      .shell {
+        width: min(1540px, calc(100vw - 28px));
+        height: calc(100vh - 28px);
+        margin: 14px auto;
+        display: grid;
+        grid-template-columns: minmax(500px, .98fr) minmax(460px, 1.02fr);
+        gap: 18px;
+      }
+      .panel {
+        min-height: 0;
+        border: 1px solid #c7d5d1;
+        background: rgba(255,255,255,.96);
+        box-shadow: var(--shadow);
+      }
+      .agent { display: grid; grid-template-rows: auto auto 1fr; }
+      .header, .map-head, .evidence-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .header { padding: 22px 24px; border-bottom: 1px solid var(--line); }
+      .mark {
+        width: 42px; height: 42px; display: grid; place-items: center;
+        background: var(--ink); color: #fff; font-weight: 850;
+      }
+      .eyebrow {
+        margin: 0 0 6px; color: var(--amber); font-size: 11px;
+        font-weight: 850; text-transform: uppercase;
+      }
+      h1, h2, h3 { margin: 0; letter-spacing: 0; }
+      h1 { font-size: clamp(26px, 3.3vw, 36px); line-height: 1.06; }
+      h2 { font-size: 19px; }
+      h3 { font-size: 16px; }
+      .pill {
+        border: 1px solid #bdd9d3; background: #e7f3f0; color: var(--teal);
+        padding: 7px 11px; font-size: 13px; font-weight: 800;
+      }
+      .query {
+        padding: 20px 24px 22px;
+        background: linear-gradient(130deg, rgba(18,109,99,.08), transparent 38%), var(--soft);
+        border-bottom: 1px solid var(--line);
+      }
+      .query label { display: block; margin-bottom: 10px; color: var(--muted); font-size: 13px; font-weight: 750; }
+      .composer { border: 1px solid #c7d5d1; background: #fff; }
+      textarea {
+        width: 100%; min-height: 118px; resize: vertical; border: 0; outline: none;
+        padding: 16px 17px; line-height: 1.58; background: transparent; color: var(--ink);
+      }
+      .bar { display: flex; align-items: center; gap: 10px; padding: 12px; border-top: 1px solid var(--line); }
+      .quick { display: flex; flex-wrap: wrap; gap: 8px; }
+      .quick button, .send {
+        min-height: 38px; border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 7px 12px;
+      }
+      .send { margin-left: auto; border-color: var(--teal); background: var(--teal); color: #fff; font-weight: 850; padding-inline: 22px; }
+      .chat { min-height: 0; overflow: auto; padding: 24px; }
+      .msg { display: grid; grid-template-columns: 36px minmax(0,1fr); gap: 12px; margin-bottom: 18px; }
+      .msg.user { grid-template-columns: minmax(0,1fr) 36px; }
+      .msg.user .avatar { grid-column: 2; background: var(--teal); color: #fff; border-color: var(--teal); }
+      .msg.user .bubble { grid-row: 1; background: #e7f3f0; border-color: #c8ded9; }
+      .avatar {
+        width: 36px; height: 36px; display: grid; place-items: center;
+        border: 1px solid var(--line); background: #fff; color: var(--teal); font-size: 12px; font-weight: 900;
+      }
+      .bubble { border: 1px solid var(--line); background: #fff; padding: 15px; line-height: 1.62; }
+      .bubble p { margin: 0 0 9px; }
+      .tools { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+      .tools span {
+        border: 1px solid var(--line); background: #fbfcfc; color: var(--muted);
+        padding: 5px 8px; font-size: 12px; font-weight: 700;
+      }
+      .cards { display: grid; gap: 9px; margin-top: 13px; }
+      .card, .evidence-card {
+        border: 1px solid var(--line); background: #fbfcfc; padding: 11px 12px;
+      }
+      .card strong, .card span, .evidence-card strong, .evidence-card span { display: block; }
+      .card span, .evidence-card span, .empty { color: var(--muted); font-size: 13px; line-height: 1.48; }
+      .map-panel { display: grid; grid-template-rows: auto minmax(0,1fr) minmax(190px,.34fr); }
+      .map-head { padding: 20px 22px; border-bottom: 1px solid var(--line); }
+      .mock-map {
+        position: relative; margin: 12px; min-height: 320px; border: 1px solid var(--line); overflow: hidden;
+        background:
+          linear-gradient(115deg, rgba(196,102,62,.18), transparent 36%),
+          linear-gradient(70deg, transparent 58%, rgba(18,109,99,.16)),
+          linear-gradient(90deg, rgba(24,33,31,.08) 1px, transparent 1px),
+          linear-gradient(rgba(24,33,31,.08) 1px, transparent 1px),
+          #f7faf9;
+        background-size: auto, auto, 30px 30px, 30px 30px, auto;
+      }
+      .road { position: absolute; background: rgba(18,109,99,.25); }
+      .r1 { width: 150%; height: 15px; left: -26%; top: 45%; transform: rotate(-13deg); }
+      .r2 { width: 13px; height: 150%; left: 62%; top: -20%; transform: rotate(17deg); }
+      .pin {
+        position: absolute; width: 28px; height: 28px; display: grid; place-items: center;
+        background: var(--teal); color: #fff; border: 2px solid #fff; font-weight: 900;
+        box-shadow: 0 8px 18px rgba(0,0,0,.2);
+      }
+      .p1 { left: 41%; top: 39%; } .p2 { left: 51%; top: 42%; } .p3 { left: 57%; top: 47%; }
+      .radius {
+        position: absolute; left: 36%; top: 28%; width: 210px; height: 150px;
+        border: 2px solid rgba(18,109,99,.6); background: rgba(18,109,99,.08);
+      }
+      .evidence { min-height: 0; display: grid; grid-template-rows: auto 1fr; border-top: 1px solid var(--line); background: #fbfcfc; }
+      .evidence-head { padding: 15px 16px 12px; border-bottom: 1px solid var(--line); }
+      .evidence-body { overflow: auto; padding: 12px 16px 16px; display: grid; gap: 8px; align-content: start; }
+      @media (max-width: 1040px) {
+        .shell { grid-template-columns: 1fr; height: auto; width: min(100vw - 20px, 780px); margin: 10px auto; }
+        .agent { min-height: 740px; } .map-panel { min-height: 650px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel agent">
+        <header class="header">
+          <div class="mark">AM</div>
+          <div><p class="eyebrow">Static HTML Prototype</p><h1>高德 AI 地图问答</h1></div>
+          <span class="pill">演示模式</span>
+        </header>
+        <section class="query">
+          <label for="q">纯 HTML 版不会保存 Key，也不会调用后端</label>
+          <form class="composer" id="f">
+            <textarea id="q">上海哪里同时有影石、大疆和 Apple Store？</textarea>
+            <div class="bar">
+              <div class="quick">
+                <button type="button">公园 + 商场</button>
+                <button type="button">附近吃的</button>
+                <button type="button">步行多久</button>
+              </div>
+              <button class="send" type="submit">模拟发送</button>
+            </div>
+          </form>
+        </section>
+        <section class="chat" id="chat">
+          <article class="msg">
+            <div class="avatar">AI</div>
+            <div class="bubble">
+              <p>这是单文件 HTML Demo，用模拟数据展示界面。正式联网、保护 Key、接 DeepSeek 和高德 Web 服务仍然需要后端。</p>
+              <div class="tools"><span>无后端</span><span>无真实 API Key</span><span>模拟地图证据</span></div>
+            </div>
+          </article>
+        </section>
+      </section>
+      <aside class="panel map-panel">
+        <header class="map-head">
+          <div><p class="eyebrow">Companion Map</p><h2>模拟共址结果</h2></div>
+          <span class="pill">Mock</span>
+        </header>
+        <div class="mock-map">
+          <div class="road r1"></div><div class="road r2"></div><div class="radius"></div>
+          <div class="pin p1">1</div><div class="pin p2">2</div><div class="pin p3">3</div>
+        </div>
+        <section class="evidence">
+          <div class="evidence-head"><div><p class="eyebrow">Grounding Evidence</p><h3>示例证据</h3></div><span class="pill">静态</span></div>
+          <div class="evidence-body">
+            <article class="evidence-card"><strong>1. 环球港候选组合</strong><span>影石 / 大疆 / Apple，最远点距 89 米</span></article>
+            <article class="evidence-card"><strong>2. 陆家嘴候选组合</strong><span>影石 / 大疆 / Apple，最远点距 238 米</span></article>
+          </div>
+        </section>
+      </aside>
+    </main>
+    <script>
+      const chat = document.querySelector("#chat");
+      document.querySelector("#f").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const q = document.querySelector("#q").value.trim();
+        chat.insertAdjacentHTML("beforeend", `<article class="msg user"><div class="avatar">你</div><div class="bubble">${escapeHtml(q)}</div></article>`);
+        chat.insertAdjacentHTML("beforeend", `<article class="msg"><div class="avatar">AI</div><div class="bubble"><p>演示回答：我找到了 2 个候选区域。正式版会由 DeepSeek 解析问题，再调用高德 API 返回真实 POI。</p><div class="tools"><span>DeepSeek: 演示</span><span>高德: 演示</span></div><div class="cards"><div class="card"><strong>1. 环球港候选组合</strong><span>最远点距 89 米</span></div><div class="card"><strong>2. 陆家嘴候选组合</strong><span>最远点距 238 米</span></div></div></div></article>`);
+        chat.scrollTop = chat.scrollHeight;
+      });
+      document.querySelectorAll(".quick button").forEach((button) => {
+        button.addEventListener("click", () => {
+          const samples = {
+            "公园 + 商场": "上海哪里同时有公园和购物中心？",
+            "附近吃的": "上海静安寺附近有什么吃的？",
+            "步行多久": "上海静安寺到上海人民广场步行多久？"
+          };
+          document.querySelector("#q").value = samples[button.textContent] || button.textContent;
+        });
+      });
+      function escapeHtml(value) {
+        return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+      }
+    </script>
+  </body>
+</html>
