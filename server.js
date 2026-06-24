@@ -440,11 +440,14 @@ function planQuestionWithRules(question, session = {}) {
 function normalizePlan(rawPlan, question, session = {}) {
   const context = session.context || {};
   const contextualNearby = shouldUseContextualNearby(question, context, rawPlan);
+  const inferredIntent = inferIntent(question, context);
   const intent = contextualNearby
     ? "nearby"
-    : ["cluster", "nearby", "route", "search"].includes(rawPlan.intent)
-      ? rawPlan.intent
-      : inferIntent(question, context);
+    : inferredIntent === "cluster"
+      ? "cluster"
+      : ["cluster", "nearby", "route", "search"].includes(rawPlan.intent)
+        ? rawPlan.intent
+        : inferredIntent;
   const city = shouldPreferContextCity(question, context) ? (context.lastCity || inferCity(question, context)) : (rawPlan.city || inferCity(question, context));
   const plan = { intent, city };
 
@@ -710,11 +713,11 @@ function parseClusterQuestion(question) {
     : 1500;
   const core = question
     .replace(/^(帮我|请|查询|查一下|找一下|找找|看看)/, "")
-    .replace(/有哪些|哪里|什么地方|地方|区域|商圈|附近|同时|都有|又有|兼具|共同|拥有|有/g, " ")
+    .replace(/有哪些|哪里|什么地方|地方|区域|商圈|附近|同时|都有|既有|既|又有|兼具|共同|拥有|有/g, " ")
     .replace(/在?上海|在?北京|在?广州|在?深圳|在?杭州/g, " ")
     .replace(/\d+(?:\.\d+)?\s*(公里|千米|km|米|m)/gi, " ");
   const tokens = core
-    .split(/[，,、和与及+＋/|;；\n]+/)
+    .split(/[\s，,、和与及+＋/|;；\n]+/)
     .map((item) => cleanupPlace(item))
     .filter((item) => item.length >= 2)
     .slice(0, 5);
