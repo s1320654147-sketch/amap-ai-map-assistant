@@ -1010,20 +1010,124 @@ body.mobile-page {
 
   .main-dashboard-layout {
     display: grid;
-    width: 100vw;
+    width: 100%;
     height: auto;
     min-height: 100vh;
-    padding: 12px;
+    padding: 12px 12px 18px;
     gap: 12px;
+    box-sizing: border-box;
   }
 
   .left-side-panel {
     width: 100%;
+    max-width: 100%;
     height: auto;
+    min-height: 0;
+    padding: 12px;
+    border-radius: 18px;
+    box-sizing: border-box;
+  }
+
+  body.has-messages .left-side-panel {
+    height: min(620px, 62svh);
+    min-height: 420px;
+  }
+
+  .left-panel-content {
     min-height: 0;
   }
 
+  .chat-stream {
+    min-height: 0;
+  }
+
+  body.has-messages .chat-stream {
+    display: grid;
+  }
+
+  .conversation {
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+
+  .ask-card,
+  .mobile-ask {
+    padding-inline: 16px;
+  }
+
+  .engine-powered-tag {
+    max-width: calc(100% - 32px);
+  }
+
   .right-map-container {
-    min-height: 580px;
+    min-height: 700px;
+    grid-template-rows: 420px minmax(260px, auto);
+  }
+
+  .map-toolbar {
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .filter-select-wrap {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 150px;
+  }
+
+  .top-filter-select {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 28px 8px 12px;
+    background-position: right 10px center;
+    text-align: center;
+  }
+
+  .map-toolbar .round {
+    width: 40px;
+    height: 40px;
+    flex: none;
+  }
+
+  .map-wrap {
+    border-radius: 18px 18px 0 0;
+  }
+
+  .map-legend {
+    left: 14px;
+    right: 72px;
+    bottom: 56px;
+    gap: 6px;
+  }
+
+  .map-legend span {
+    padding: 6px 9px;
+    font-size: 11px;
+  }
+
+  .scale-chip {
+    right: 18px;
+    bottom: 72px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: var(--shadow);
+  }
+
+  .amap-geolocation-con {
+    right: 14px !important;
+    bottom: 18px !important;
+  }
+
+  .amap-logo,
+  .amap-copyright {
+    bottom: 8px !important;
+  }
+
+  .evidence-table {
+    border-radius: 0 0 18px 18px;
   }
 }

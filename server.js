@@ -312,9 +312,9 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
       city: plan.city,
       conditions: plan.conditions,
       radius: plan.radius,
-      maxResults: 12
+      maxResults: 24
     });
-    const top = result.matches.slice(0, 8);
+    const top = result.matches.slice(0, 12);
     const conditionText = result.conditions.map((item) => item.label).join("、");
     return maybeFinalizeAgentResponse({
       intent: "cluster",
@@ -479,7 +479,7 @@ function normalizePlan(rawPlan, question, session = {}) {
       .filter((condition) => condition.label && condition.aliases.length)
       .slice(0, 5);
     if (plan.conditions.length < 2) plan.conditions = parsed.conditions;
-    plan.radius = clampRadius(rawPlan.radius || parsed.radius, 100, 5000, 800);
+    plan.radius = clampRadius(rawPlan.radius || parsed.radius, 100, 10000, 1500);
     return plan;
   }
 
@@ -577,9 +577,9 @@ async function answerWithAmap(question) {
       city,
       conditions: clusterQuery.conditions,
       radius: clusterQuery.radius,
-      maxResults: 12
+      maxResults: 24
     });
-    const top = result.matches.slice(0, 8);
+    const top = result.matches.slice(0, 12);
     const conditionText = result.conditions.map((item) => item.label).join("、");
     return {
       intent,
@@ -706,8 +706,8 @@ function parseNearbyQuestion(question, context = {}) {
 function parseClusterQuestion(question) {
   const radiusMatch = question.match(/(\d+(?:\.\d+)?)\s*(公里|千米|km|米|m)/i);
   const radius = radiusMatch
-    ? Math.min(5000, Math.max(100, Math.round(Number(radiusMatch[1]) * (/公里|千米|km/i.test(radiusMatch[2]) ? 1000 : 1))))
-    : 800;
+    ? Math.min(10000, Math.max(100, Math.round(Number(radiusMatch[1]) * (/公里|千米|km/i.test(radiusMatch[2]) ? 1000 : 1))))
+    : 1500;
   const core = question
     .replace(/^(帮我|请|查询|查一下|找一下|找找|看看)/, "")
     .replace(/有哪些|哪里|什么地方|地方|区域|商圈|附近|同时|都有|又有|兼具|共同|拥有|有/g, " ")
@@ -848,9 +848,32 @@ async function findCoLocatedConditions({ city, conditions, radius, maxResults })
 
 async function searchConditionPois(condition, city) {
   const groups = await Promise.all(
-    condition.aliases.map((keyword) => searchText({ keywords: keyword, city, pageSize: 25, pages: 1 }))
+    condition.aliases.map((keyword) => searchText({ keywords: keyword, city, pageSize: 25, pages: 4 }))
   );
-  return tagRankingsForPois(dedupePois(groups.flat()).filter((poi) => hasLocation(poi)));
+  return tagRankingsForPois(
+    dedupePois(groups.flat()).filter((poi) => hasLocation(poi) && conditionMatchesPoi(condition, poi))
+  );
+}
+
+function conditionMatchesPoi(condition, poi) {
+  const rawName = String(poi?.name || "");
+  const rawText = [poi?.name, poi?.address, poi?.district].filter(Boolean).join(" ");
+  const text = rawText.toLowerCase();
+  const normalizedText = normalizeLooseText(rawText);
+  const conditionText = condition.aliases.join(" ").toLowerCase();
+
+  if (/盒马|hema/.test(conditionText)) {
+    return /盒马|hema/i.test(rawName) && !/员工餐厅|员工食堂/.test(rawName);
+  }
+
+  if (/奥乐齐|奥乐奇|aldi/.test(conditionText)) {
+    return /奥乐齐|aldi/i.test(rawName);
+  }
+
+  return condition.aliases.some((alias) => {
+    const normalizedAlias = normalizeLooseText(alias);
+    return normalizedAlias && normalizedText.includes(normalizedAlias);
+  }) || text.includes(condition.label.toLowerCase());
 }
 
 function getConditions(url) {
@@ -873,18 +896,34 @@ function getConditions(url) {
 
 function parseCondition(raw) {
   const cleaned = String(raw || "").trim();
-  const aliases = cleaned
+  const baseAliases = cleaned
     .split(/[，,、|/]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+  const aliases = expandConditionAliases(baseAliases.length ? baseAliases : [cleaned]);
   return {
     label: aliases[0] || cleaned,
     aliases
   };
 }
 
+function expandConditionAliases(values) {
+  const expanded = new Set(values.filter(Boolean));
+  const text = values.join(" ").toLowerCase();
+
+  if (/盒马|hema/.test(text)) {
+    ["盒马", "盒马鲜生", "盒马X会员店", "Hema", "Hema Fresh"].forEach((item) => expanded.add(item));
+  }
+
+  if (/奥乐齐|奥乐奇|aldi/.test(text)) {
+    ["奥乐齐", "奥乐奇", "ALDI", "Aldi", "阿尔迪"].forEach((item) => expanded.add(item));
+  }
+
+  return [...expanded];
+}
+
 function estimateClusterCalls(conditions) {
-  return conditions.reduce((sum, condition) => sum + condition.aliases.length, 0);
+  return conditions.reduce((sum, condition) => sum + condition.aliases.length * 4, 0);
 }
 
 function buildRouteAnalysis({ origin, destination, kilometers, minutes }) {

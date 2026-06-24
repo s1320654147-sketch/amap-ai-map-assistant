@@ -684,7 +684,7 @@ function buildAnswerCards(payload) {
 
   const matches = payload?.data?.matches || [];
   if (Array.isArray(matches) && matches.length) {
-    return `<div class="answer-list">${matches.slice(0, 4).map((match) => `
+    return `<div class="answer-list">${matches.slice(0, 8).map((match) => `
       <article class="place-card">
         <div class="place-photo"></div>
         <div class="place-card-main">
@@ -919,7 +919,7 @@ function renderAgentEvidence(payload) {
   if (payload.intent === "cluster" && Array.isArray(payload.data?.matches)) {
     els.evidence.innerHTML = payload.data.matches.length
       ? payload.data.matches
-          .slice(0, 6)
+          .slice(0, 10)
           .map((match, index) => evidenceRow(index + 1, match.title, "多条件组合", `${match.maxPairDistanceMeters}m`, "4.6", "高德"))
           .join("")
       : `<p class="empty">没有找到满足条件的组合。</p>`;
