@@ -16,9 +16,14 @@ loadEnv(path.join(rootDir, ".env"));
 const PORT = Number(process.env.PORT || 5177);
 const HOST = process.env.HOST || "0.0.0.0";
 const AMAP_BASE = "https://restapi.amap.com";
-const AMAP_MIN_INTERVAL_MS = Number(process.env.AMAP_MIN_INTERVAL_MS || 350);
+const AMAP_MIN_INTERVAL_MS = Number(process.env.AMAP_MIN_INTERVAL_MS || 800);
 const DEEPSEEK_TIMEOUT_MS = Number(process.env.DEEPSEEK_TIMEOUT_MS || 12000);
 const AMAP_TIMEOUT_MS = Number(process.env.AMAP_TIMEOUT_MS || 18000);
+const AMAP_RATE_LIMIT_RETRY_COUNT = Number(process.env.AMAP_RATE_LIMIT_RETRY_COUNT || 3);
+const AMAP_RATE_LIMIT_BACKOFF_MS = Number(process.env.AMAP_RATE_LIMIT_BACKOFF_MS || 1200);
+const OUTBOUND_FETCH_RETRY_COUNT = Number(process.env.OUTBOUND_FETCH_RETRY_COUNT || 2);
+const OUTBOUND_FETCH_RETRY_BACKOFF_MS = Number(process.env.OUTBOUND_FETCH_RETRY_BACKOFF_MS || 900);
+const SEARCH_COUNT_MAX_PAGES = Number(process.env.SEARCH_COUNT_MAX_PAGES || 20);
 let nextAmapRequestAt = 0;
 let amapQueue = Promise.resolve();
 
@@ -233,6 +238,18 @@ async function handleApi(req, url, res) {
     return;
   }
 
+  if (url.pathname === "/api/rankings/map") {
+    const city = String(url.searchParams.get("city") || "上海").trim() || "上海";
+    const lists = loadRankingLists();
+    const missingResolved =
+      !lists.resolved?.saojiebang?.length && !lists.resolved?.bichibang?.length && !lists.resolved?.bibendum?.length;
+    const resolved = missingResolved ? await resolveRankingLists(lists.raw, city) : lists.resolved;
+    if (missingResolved) persistResolvedRankingLists(resolved);
+    const markers = buildRankingMapEntries({ raw: lists.raw, resolved });
+    sendJson(res, 200, { ok: true, city, markers });
+    return;
+  }
+
   sendJson(res, 404, { ok: false, error: "接口不存在" });
 }
 
@@ -348,28 +365,39 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     }, session, options);
   }
 
-  const pois = await searchText({ keywords: plan.keywords, city: plan.city, pageSize: 20, pages: 1 });
-  const taggedPois = tagRankingsForPois(pois);
+  const searchResult = await searchTextWithMeta({
+    keywords: plan.keywords,
+    city: plan.city,
+    pageSize: 25,
+    pages: plan.countMode ? 6 : 2,
+    countMode: plan.countMode
+  });
+  const taggedPois = tagRankingsForPois(searchResult.pois);
   const top = taggedPois.slice(0, 10);
   return maybeFinalizeAgentResponse({
     intent: "search",
     planner: plan.planner,
     question,
     city: plan.city,
-    analysis: buildSearchAnalysis({
-      city: plan.city,
-      keywords: plan.keywords,
-      pois: taggedPois,
-      top
-    }),
-    answer: `我用「${plan.keywords}」在${plan.city || "全国"}搜索到了 ${pois.length} 个高德 POI，展示前 ${top.length} 个。`,
+      analysis: buildSearchAnalysis({
+        city: plan.city,
+        keywords: plan.keywords,
+        countMode: plan.countMode,
+        estimatedCount: searchResult.estimatedCount,
+        countExhaustive: searchResult.countExhaustive,
+        pois: taggedPois,
+        top
+      }),
+    answer: plan.countMode
+      ? `${searchResult.countExhaustive ? "我用" : "我至少用"}「${plan.keywords}」在${plan.city || "全国"}范围内基于高德真实结果查到了${searchResult.countExhaustive ? `${searchResult.estimatedCount}` : `至少 ${searchResult.estimatedCount}`}家相关门店。`
+      : `我用「${plan.keywords}」在${plan.city || "全国"}搜索到了 ${taggedPois.length} 个高德 POI，当前先展示前 ${top.length} 个。`,
     map: {
       mode: "pois",
       center: top[0]?.location || defaultCityCenter(plan.city),
       markers: top.map((poi, index) => poiToMarker(poi, String(index + 1))),
       legends: rankingLegendSummary(top)
     },
-    data: { plan, pois: top },
+    data: { plan, totalCount: searchResult.estimatedCount, countExhaustive: searchResult.countExhaustive, pois: top, allPois: taggedPois.slice(0, 80) },
     source: "DeepSeek/规则解析 + 高德关键字搜索",
     context: buildNextContext({ question, plan })
   }, session, options);
@@ -408,7 +436,7 @@ async function planQuestionWithDeepSeek(question, session = {}) {
         {
           role: "system",
           content:
-            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边；route 用于多远/多久/路线；search 用于普通搜索。城市缺省用上海。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city 和 address。"
+            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边；route 用于多远/多久/路线；search 用于普通搜索。城市缺省用上海。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city 和 address。重要约束：当用户提到具体品牌名时，默认理解为该品牌的官方门店/官方品牌点，而不是商场名、广场名、配送站、云仓、员工餐厅、内部食堂、奥莱、mini 或地址描述。若用户说“山姆”“大疆”“蜜雪冰城”“喜茶”等品牌，优先按官方品牌门店理解。"
         },
         {
           role: "system",
@@ -488,6 +516,7 @@ function normalizePlan(rawPlan, question, session = {}) {
 
   const parsed = parseSearchQuestion(question, context);
   plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || question);
+  plan.countMode = Boolean(rawPlan.countMode || parsed.countMode);
   return plan;
 }
 
@@ -732,10 +761,11 @@ function parseClusterQuestion(question) {
 function parseSearchQuestion(question, context = {}) {
   const inherited = /(那里|那边|那附近|这边|这附近|继续|再找|还有没有)/.test(question) ? context.lastAddress || "" : "";
   return {
+    countMode: /(一共|总共|总计|共有|多少家|几家|多少个|门店数|门店数量)/.test(question),
     keywords: cleanupPlace(
       question
         .replace(/^(帮我|请|查询|查一下|找一下|搜索)/, "")
-        .replace(/有哪些|哪里|附近|高德|地图/g, " ")
+        .replace(/一共|总共|总计|共有|多少家|几家|多少个|门店数|门店数量|有哪些|哪里|附近|高德|地图/g, " ")
     ),
     addressHint: inherited
   };
@@ -853,15 +883,17 @@ async function searchConditionPois(condition, city) {
   const groups = await Promise.all(
     condition.aliases.map((keyword) => searchText({ keywords: keyword, city, pageSize: 25, pages: 4 }))
   );
-  return tagRankingsForPois(
-    dedupePois(groups.flat()).filter((poi) => hasLocation(poi) && conditionMatchesPoi(condition, poi))
+  const pois = dedupePois(groups.flat()).filter(
+    (poi) => hasLocation(poi) && !isSuppressedPoiForQuery(condition.aliases, poi) && conditionMatchesPoi(condition, poi)
   );
+  return tagRankingsForPois(await safeRefineConditionPoisWithDeepSeek(condition, pois));
 }
 
 function conditionMatchesPoi(condition, poi) {
   const rawName = String(poi?.name || "");
   const rawText = [poi?.name, poi?.address, poi?.district].filter(Boolean).join(" ");
   const text = rawText.toLowerCase();
+  const normalizedName = normalizeLooseText(rawName);
   const normalizedText = normalizeLooseText(rawText);
   const conditionText = condition.aliases.join(" ").toLowerCase();
 
@@ -869,14 +901,41 @@ function conditionMatchesPoi(condition, poi) {
     return /盒马|hema/i.test(rawName) && !/员工餐厅|员工食堂/.test(rawName);
   }
 
+  if (/山姆|sam/.test(conditionText)) {
+    return /山姆会员商店|山姆会员店|sam'?s club/i.test(rawName) && !/配送站|云仓|极速达|app配送|仅限app配送|奥莱|mini/i.test(rawName);
+  }
+
   if (/奥乐齐|奥乐奇|aldi/.test(conditionText)) {
     return /奥乐齐|aldi/i.test(rawName);
+  }
+
+  if (isLikelyOfficialBrandQuery(condition)) {
+    return condition.aliases.some((alias) => {
+      const normalizedAlias = normalizeLooseText(alias);
+      return normalizedAlias && normalizedName.includes(normalizedAlias);
+    }) && !isSuppressedBrandVariant(condition.aliases, poi);
   }
 
   return condition.aliases.some((alias) => {
     const normalizedAlias = normalizeLooseText(alias);
     return normalizedAlias && normalizedText.includes(normalizedAlias);
   }) || text.includes(condition.label.toLowerCase());
+}
+
+function isLikelyOfficialBrandQuery(condition) {
+  const text = condition.aliases.join(" ").toLowerCase();
+  if (/公园|商场|购物中心|景区|酒店|医院|地铁|学校|餐饮|美食|咖啡|火锅|超市|便利店/.test(text)) {
+    return false;
+  }
+  return condition.aliases.some((alias) => normalizeLooseText(alias).length >= 2);
+}
+
+function isSuppressedBrandVariant(queryTerms, poi) {
+  const queryText = queryTerms.join(" ");
+  if (/配送站|云仓|奥莱|mini|express|极速达|app配送|仅限app配送/i.test(queryText)) return false;
+
+  const poiText = [poi?.name, poi?.address, poi?.district, poi?.type].filter(Boolean).join(" ");
+  return /配送站|云仓|奥莱|mini|express|极速达|app配送|仅限app配送/i.test(poiText);
 }
 
 function getConditions(url) {
@@ -920,6 +979,10 @@ function expandConditionAliases(values) {
 
   if (/奥乐齐|奥乐奇|aldi/.test(text)) {
     ["奥乐齐", "奥乐奇", "ALDI", "Aldi", "阿尔迪"].forEach((item) => expanded.add(item));
+  }
+
+  if (/山姆|sam/.test(text)) {
+    ["山姆", "山姆会员店", "山姆会员商店", "Sam's Club", "Sams Club"].forEach((item) => expanded.add(item));
   }
 
   return [...expanded];
@@ -968,8 +1031,19 @@ function buildClusterAnalysis({ top, radius, conditionText }) {
   ].join("\n\n");
 }
 
-function buildSearchAnalysis({ city, keywords, pois, top }) {
+function buildSearchAnalysis({ city, keywords, pois, top, countMode = false, estimatedCount = 0, countExhaustive = true }) {
   const rankingStats = summarizeRankingStats(pois);
+  if (countMode) {
+    const sampleText = top.length
+      ? `我先拿高德真实结果给你核了一轮，当前这批里比较明确的样例有：${top.slice(0, 3).map((poi) => poi.name).join("、")}。`
+      : "这次没有拿到足够稳定的样例门店。";
+    return [
+      `我先给你一个直接结论：按这轮高德真实结果核算，在 ${city || "全国"} 范围内，「${keywords}」${countExhaustive ? `共有 ${estimatedCount || pois.length}` : `至少有 ${estimatedCount || pois.length}`}家。`,
+      sampleText,
+      "说明一下：这种“总共有多少家”的问题，本质上是在做门店规模统计，所以我会优先回答总数，再把少量样例门店拿给你交叉确认，而不是默认只给前十家。",
+      "如果你愿意，我下一步可以继续帮你拆成各区分布、官方门店名单，或者离你最近的几家。"
+    ].join("\n\n");
+  }
   return [
     `我用「${keywords}」在 ${city || "全国"} 范围内查到了 ${pois.length} 个高德真实 POI，当前先给你展示前 ${top.length} 个。`,
     `推荐理由：这一批结果适合作为第一轮粗筛，因为它先解决“有没有”和“都在哪”，后面再叠加条件会更稳。${rankingStats.summary}`,
@@ -1062,7 +1136,7 @@ async function summarizeWithDeepSeek(result, session = {}) {
           {
             role: "system",
             content:
-              "你是 AI 地图助手。你只能根据提供给你的高德真实结果做总结，不能虚构任何地点、距离、路线、评分、榜单信息。输出 JSON：{\"analysis\":\"拟人化回复\",\"answer\":\"一句简明结论\"}。analysis 要用亲切、自然、像真人助理的中文来回答用户，不要机械罗列清单，要结合真实数据给出推荐，并在末尾主动发起下一轮沟通。answer 只保留一句最核心结论。"
+              "你是 AI 地图助手。你只能根据提供给你的高德真实结果做总结，不能虚构任何地点、距离、路线、评分、榜单信息。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。输出 JSON：{\"analysis\":\"拟人化回复\",\"answer\":\"一句简明结论\"}。analysis 要用亲切、自然、像真人助理的中文来回答用户，不要机械罗列清单，要结合真实数据给出推荐，并在末尾主动发起下一轮沟通。answer 只保留一句最核心结论。"
           },
           {
             role: "system",
@@ -1110,7 +1184,7 @@ async function streamDeepSeekNarration(result, session = {}, res) {
           {
             role: "system",
             content:
-              "你是 AI 地图助手。请严格根据高德 API 的真实结果回答，不能编造事实。回答要亲切、自然、拟人化，像一个会聊天的生活助理，不要机械罗列清单。你需要在结尾主动问用户下一步想继续筛什么。"
+              "你是 AI 地图助手。请严格根据高德 API 的真实结果回答，不能编造事实。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。回答要亲切、自然、拟人化，像一个会聊天的生活助理，不要机械罗列清单。你需要在结尾主动问用户下一步想继续筛什么。"
           },
           {
             role: "system",
@@ -1167,6 +1241,7 @@ async function streamDeepSeekNarration(result, session = {}, res) {
 
 function buildNarrationPrompt(result, session = {}) {
   const history = Array.isArray(session.history) ? session.history.slice(-12) : [];
+  const exactNames = collectExactPoiNames(result);
   const facts = {
     question: result.question,
     city: result.city,
@@ -1178,9 +1253,80 @@ function buildNarrationPrompt(result, session = {}) {
   return [
     `你是 AI 地图助手。用户刚才问了：${result.question}。`,
     `通过高德 API 查询到的真实数据如下：${JSON.stringify(facts, null, 2)}。`,
+    `如果你需要提到具体门店或地点名称，只能从这份原始名称清单里逐字引用：${JSON.stringify(exactNames)}。`,
     `历史对话如下：${JSON.stringify(history, null, 2)}。`,
-    "请结合上述真实数据，用亲切、自然的拟人化语言回答用户，推荐合适的地方，并在末尾主动引导、询问用户以继续沟通。绝对不要机械地罗列清单，要像人类助手一样对话。"
+    "请结合上述真实数据，用亲切、自然的拟人化语言回答用户。回答风格要跟随问题本身：如果用户在问总数、规模、多少家，就优先直接回答数量和统计口径；如果用户在问推荐、附近、去哪儿，再进入推荐式表达。绝对不要把所有问题都回答成同一种模板。"
   ].join("\n\n");
+}
+
+function collectExactPoiNames(result) {
+  const names = new Set();
+
+  for (const poi of result?.data?.pois || []) {
+    if (poi?.name) names.add(poi.name);
+  }
+
+  for (const match of result?.data?.matches || []) {
+    if (match?.title) names.add(match.title);
+    for (const member of match?.members || []) {
+      if (member?.poi?.name) names.add(member.poi.name);
+    }
+  }
+
+  return [...names].slice(0, 80);
+}
+
+async function searchTextWithMeta({ keywords, city = "", pageSize = 20, pages = 1, countMode = false }) {
+  const firstPayload = await amapGet("/v3/place/text", {
+    keywords,
+    city,
+    offset: String(pageSize),
+    page: "1",
+    extensions: "all",
+    citylimit: city ? "true" : "false"
+  });
+  const rawCount = Number(firstPayload.count || 0);
+  const availablePages = Math.max(1, Math.ceil(rawCount / pageSize));
+  const targetPages = countMode
+    ? Math.min(SEARCH_COUNT_MAX_PAGES, availablePages)
+    : pages;
+
+  const payloads = [firstPayload];
+  if (targetPages > 1) {
+    const requests = [];
+    for (let page = 2; page <= targetPages; page += 1) {
+      requests.push(
+        amapGet("/v3/place/text", {
+          keywords,
+          city,
+          offset: String(pageSize),
+          page: String(page),
+          extensions: "all",
+          citylimit: city ? "true" : "false"
+        })
+      );
+    }
+    payloads.push(...(await Promise.all(requests)));
+  }
+
+  let pois = dedupePois(payloads.flatMap((payload) => payload.pois || []));
+
+  const condition = parseCondition(keywords);
+  if (isLikelyOfficialBrandQuery(condition)) {
+    pois = dedupePois(
+      (await safeRefineConditionPoisWithDeepSeek(
+        condition,
+        pois.filter((poi) => hasLocation(poi) && !isSuppressedPoiForQuery(condition.aliases, poi) && conditionMatchesPoi(condition, poi))
+      )) || []
+    );
+  }
+
+  return {
+    pois,
+    rawCount,
+    countExhaustive: !countMode || availablePages <= SEARCH_COUNT_MAX_PAGES,
+    estimatedCount: countMode ? pois.length : pois.length
+  };
 }
 
 function buildNextContext({ question, plan, origin, destination }) {
@@ -1296,7 +1442,97 @@ async function searchBrandVariants(input, city) {
   const groups = await Promise.all(
     keywords.map((keyword) => searchText({ keywords: keyword, city, pageSize: 25, pages: 1 }))
   );
-  return dedupePois(groups.flat()).filter((poi) => hasLocation(poi));
+  const pois = dedupePois(groups.flat()).filter((poi) => hasLocation(poi) && !isSuppressedPoiForQuery(keywords, poi));
+  return safeRefineConditionPoisWithDeepSeek({ label: input, aliases: keywords }, pois);
+}
+
+async function safeRefineConditionPoisWithDeepSeek(condition, pois) {
+  try {
+    return await refineConditionPoisWithDeepSeek(condition, pois);
+  } catch {
+    return pois;
+  }
+}
+
+async function refineConditionPoisWithDeepSeek(condition, pois) {
+  loadEnv(path.join(rootDir, ".env"));
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey || !Array.isArray(pois) || pois.length <= 3) return pois;
+
+  const baseUrl = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
+  const model = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+  const batchSize = 40;
+  const keptIds = new Set();
+
+  for (let offset = 0; offset < pois.length; offset += batchSize) {
+    const batch = pois.slice(offset, offset + batchSize).map((poi, index) => ({
+      id: String(offset + index),
+      name: poi.name,
+      address: [poi.city, poi.district, poi.address].filter(Boolean).join(" "),
+      type: poi.type
+    }));
+
+    const response = await fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是高德 POI 候选过滤器。你只能根据用户目标条件和候选 POI 的名字、地址、类型做分类，不能编造新地点。输出 JSON：{\"keepIds\":[\"id1\",\"id2\"]}。保留规则必须严格：如果用户查的是品牌名，就默认理解为该品牌的官方门店/官方品牌点。不要把商场名、广场名、楼宇名、配送站、云仓、奥莱、mini、员工餐厅、内部食堂、柜台、快闪点、地址描述或无关商户算进去。判断时以候选点自己的 name 为第一依据，address 和 type 只做辅助。只要存在疑义，就宁可剔除，不要误保留。只有当候选点本身就是目标品牌、目标门店或目标业态时才保留。名字相近但不是同一品牌的点，一律剔除。"
+            },
+            {
+              role: "user",
+              content: JSON.stringify({
+                target: {
+                  label: condition.label,
+                  aliases: condition.aliases
+                },
+                candidates: batch
+              })
+            }
+          ]
+        })
+      },
+      DEEPSEEK_TIMEOUT_MS,
+      "DeepSeek候选过滤"
+    );
+
+    if (!response.ok) throw new Error(`DeepSeek filter HTTP ${response.status}`);
+    const payload = await response.json();
+    const text = payload.choices?.[0]?.message?.content;
+    if (!text) throw new Error("DeepSeek filter returned empty content");
+    const parsed = JSON.parse(text);
+    for (const id of Array.isArray(parsed.keepIds) ? parsed.keepIds : []) {
+      keptIds.add(String(id));
+    }
+  }
+
+  return pois.filter((_, index) => keptIds.has(String(index)));
+}
+
+function isSuppressedPoiForQuery(queryTerms, poi) {
+  const queryText = queryTerms.join(" ");
+  if (explicitlyRequestsSuppressedPoi(queryText)) return false;
+
+  const poiText = [poi?.name, poi?.address, poi?.district, poi?.type].filter(Boolean).join(" ");
+  return matchesSuppressedPoiText(poiText);
+}
+
+function explicitlyRequestsSuppressedPoi(text) {
+  return /员工餐厅|员工食堂|职工餐厅|职工食堂|内部餐厅|内部食堂|园区食堂|公司食堂/i.test(String(text || ""));
+}
+
+function matchesSuppressedPoiText(text) {
+  return /员工餐厅|员工食堂|职工餐厅|职工食堂|内部餐厅|内部食堂|园区食堂|公司食堂/i.test(String(text || ""));
 }
 
 async function findNearbyCommercialPlaces(location) {
@@ -1413,27 +1649,41 @@ async function walkingRoute(origin, destination) {
 }
 
 async function amapGet(endpoint, params) {
-  await waitForAmapSlot();
-  const amapKey = getAmapKey();
-  const url = new URL(endpoint, AMAP_BASE);
-  url.searchParams.set("key", amapKey);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") {
-      url.searchParams.set(key, value);
+  for (let attempt = 0; attempt <= AMAP_RATE_LIMIT_RETRY_COUNT; attempt += 1) {
+    await waitForAmapSlot();
+    const amapKey = getAmapKey();
+    const url = new URL(endpoint, AMAP_BASE);
+    url.searchParams.set("key", amapKey);
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        url.searchParams.set(key, value);
+      }
     }
-  }
 
-  const response = await fetchWithTimeout(url, {}, AMAP_TIMEOUT_MS, "高德接口");
-  if (!response.ok) {
-    throw new Error(`高德接口 HTTP ${response.status}`);
-  }
+    const response = await fetchWithTimeout(url, {}, AMAP_TIMEOUT_MS, "高德接口");
+    if (!response.ok) {
+      throw new Error(`高德接口 HTTP ${response.status}`);
+    }
 
-  const payload = await response.json();
-  if (payload.status !== "1") {
+    const payload = await response.json();
+    if (payload.status === "1") {
+      return payload;
+    }
+
+    if (isAmapRateLimitError(payload) && attempt < AMAP_RATE_LIMIT_RETRY_COUNT) {
+      const backoff = AMAP_RATE_LIMIT_BACKOFF_MS * (attempt + 1);
+      nextAmapRequestAt = Math.max(nextAmapRequestAt, Date.now() + backoff);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+      continue;
+    }
+
     throw new Error(payload.info || payload.infocode || "高德接口返回失败");
   }
+}
 
-  return payload;
+function isAmapRateLimitError(payload) {
+  const text = `${payload?.info || ""} ${payload?.infocode || ""}`.toUpperCase();
+  return text.includes("CUQPS_HAS_EXCEEDED_THE_LIMIT") || text.includes("USER_DAILY_QUERY_OVER_LIMIT");
 }
 
 function waitForAmapSlot() {
@@ -1450,18 +1700,38 @@ function waitForAmapSlot() {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15000, label = "请求") {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`${label}超时，请稍后重试`);
+  for (let attempt = 0; attempt <= OUTBOUND_FETCH_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        if (attempt < OUTBOUND_FETCH_RETRY_COUNT) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new Error(`${label}超时，请稍后重试`);
+      }
+
+      const message = String(error?.message || "");
+      const retryable =
+        error instanceof TypeError ||
+        /fetch failed|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket/i.test(message);
+      if (retryable && attempt < OUTBOUND_FETCH_RETRY_COUNT) {
+        await waitBeforeRetry(attempt);
+        continue;
+      }
+      throw new Error(retryable ? `${label}网络波动，请稍后重试` : message || `${label}失败`);
+    } finally {
+      clearTimeout(timer);
     }
-    throw error;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+async function waitBeforeRetry(attempt) {
+  const delay = OUTBOUND_FETCH_RETRY_BACKOFF_MS * (attempt + 1);
+  await new Promise((resolve) => setTimeout(resolve, delay));
 }
 
 function getAmapKey() {
@@ -1509,25 +1779,31 @@ function dedupePois(pois) {
 
 function loadRankingLists() {
   try {
-    const raw = existsSync(rankingListsPath) ? JSON.parse(readFileSync(rankingListsPath, "utf8")) : { saojiebang: [], bichibang: [] };
+    const raw = existsSync(rankingListsPath) ? parseJsonFile(rankingListsPath) : { saojiebang: [], bichibang: [], bibendum: [] };
     const resolved = existsSync(rankingResolvedPath)
-      ? JSON.parse(readFileSync(rankingResolvedPath, "utf8"))
-      : { saojiebang: [], bichibang: [] };
+      ? parseJsonFile(rankingResolvedPath)
+      : { saojiebang: [], bichibang: [], bibendum: [] };
 
     return {
       raw,
       resolved,
       saojiebang: normalizeRankingEntries(resolved.saojiebang?.length ? resolved.saojiebang : raw.saojiebang),
-      bichibang: normalizeRankingEntries(resolved.bichibang?.length ? resolved.bichibang : raw.bichibang)
+      bichibang: normalizeRankingEntries(resolved.bichibang?.length ? resolved.bichibang : raw.bichibang),
+      bibendum: normalizeRankingEntries(resolved.bibendum?.length ? resolved.bibendum : raw.bibendum)
     };
   } catch {
     return {
-      raw: { saojiebang: [], bichibang: [] },
-      resolved: { saojiebang: [], bichibang: [] },
+      raw: { saojiebang: [], bichibang: [], bibendum: [] },
+      resolved: { saojiebang: [], bichibang: [], bibendum: [] },
       saojiebang: [],
-      bichibang: []
+      bichibang: [],
+      bibendum: []
     };
   }
+}
+
+function parseJsonFile(filePath) {
+  return JSON.parse(String(readFileSync(filePath, "utf8")).replace(/^\uFEFF/, ""));
 }
 
 function normalizeRankingEntries(entries) {
@@ -1547,6 +1823,11 @@ function normalizeRankingEntries(entries) {
         name: textOrEmpty(entry.name || entry.title),
         address: textOrEmpty(entry.address),
         location: textOrEmpty(entry.location),
+        cuisine: textOrEmpty(entry.cuisine || entry.category || entry.type),
+        price: textOrEmpty(entry.price || entry.avgPrice || entry.averagePrice),
+        district: textOrEmpty(entry.district || entry.region),
+        area: textOrEmpty(entry.area),
+        amapName: textOrEmpty(entry.amapName),
         normalizedName: normalizeLooseText(entry.name || entry.title),
         normalizedAddress: normalizeLooseText(entry.address)
       };
@@ -1557,7 +1838,8 @@ function normalizeRankingEntries(entries) {
 async function resolveRankingLists(lists, city) {
   return {
     saojiebang: await resolveRankingCategoryEntries(lists?.saojiebang || [], city),
-    bichibang: await resolveRankingCategoryEntries(lists?.bichibang || [], city)
+    bichibang: await resolveRankingCategoryEntries(lists?.bichibang || [], city),
+    bibendum: await resolveRankingCategoryEntries(lists?.bibendum || [], city)
   };
 }
 
@@ -1570,7 +1852,12 @@ async function resolveRankingCategoryEntries(entries, city) {
       results.push({
         name: entry.name,
         address: entry.address,
-        location: entry.location
+        location: entry.location,
+        cuisine: entry.cuisine || "",
+        price: entry.price || "",
+        district: entry.district || "",
+        area: entry.area || "",
+        amapName: entry.amapName || ""
       });
       continue;
     }
@@ -1582,7 +1869,10 @@ async function resolveRankingCategoryEntries(entries, city) {
       address: best?.address || "",
       location: best?.location || "",
       amapName: best?.name || "",
-      district: best?.district || ""
+      district: best?.district || "",
+      cuisine: entry.cuisine || "",
+      price: entry.price || "",
+      area: entry.area || ""
     });
   }
 
@@ -1614,6 +1904,70 @@ function persistResolvedRankingLists(resolved) {
   }
 }
 
+function buildRankingMapEntries({ raw, resolved }) {
+  const categories = [
+    { key: "saojiebang", label: "扫街榜", rawEntries: raw?.saojiebang || [], resolvedEntries: resolved?.saojiebang || [] },
+    { key: "bichibang", label: "必吃榜", rawEntries: raw?.bichibang || [], resolvedEntries: resolved?.bichibang || [] },
+    { key: "bibendum", label: "必比登", rawEntries: raw?.bibendum || [], resolvedEntries: resolved?.bibendum || [] }
+  ];
+
+  const merged = new Map();
+  for (const category of categories) {
+    const normalizedRaw = normalizeRankingEntries(category.rawEntries);
+    const normalizedResolved = normalizeRankingEntries(category.resolvedEntries);
+    normalizedResolved.forEach((entry, index) => {
+      if (!entry.location) return;
+      const source = normalizedRaw[index] || {};
+      const key = entry.location || `${entry.normalizedName}|${entry.normalizedAddress}`;
+      const current = merged.get(key) || {
+        id: key,
+        name: entry.amapName || entry.name,
+        sourceNames: [],
+        address: entry.address || "",
+        location: entry.location,
+        district: entry.district || source.district || "",
+        area: source.area || entry.area || "",
+        cuisine: source.cuisine || entry.cuisine || "",
+        price: source.price || entry.price || "",
+        categories: [],
+        labels: []
+      };
+
+      current.name = choosePreferredRankingName(current.name, entry.amapName || entry.name);
+      current.address = current.address || entry.address || "";
+      current.district = current.district || entry.district || source.district || "";
+      current.area = current.area || source.area || entry.area || "";
+      current.cuisine = current.cuisine || source.cuisine || entry.cuisine || "";
+      current.price = current.price || source.price || entry.price || "";
+      current.categories = [...new Set([...current.categories, category.key])];
+      current.labels = [...new Set([...current.labels, category.label])];
+      current.sourceNames = [...new Set([...current.sourceNames, source.name || entry.name].filter(Boolean))];
+      merged.set(key, current);
+    });
+  }
+
+  return [...merged.values()]
+    .sort((left, right) => left.name.localeCompare(right.name, "zh-Hans-CN"))
+    .map((item) => ({
+      ...item,
+      rankingCategory: rankingCategoryFromKeys(item.categories)
+    }));
+}
+
+function choosePreferredRankingName(currentName, candidateName) {
+  const current = String(currentName || "").trim();
+  const candidate = String(candidateName || "").trim();
+  if (!current) return candidate;
+  if (!candidate) return current;
+  return candidate.length > current.length ? candidate : current;
+}
+
+function rankingCategoryFromKeys(keys) {
+  const unique = [...new Set(keys || [])];
+  if (unique.length > 1) return "multi";
+  return unique[0] || "";
+}
+
 function tagRankingsForPois(pois) {
   const lists = loadRankingLists();
   return pois.map((poi) => applyRankingTags(poi, lists));
@@ -1622,15 +1976,18 @@ function tagRankingsForPois(pois) {
 function applyRankingTags(poi, lists) {
   const matchedSaojie = lists.saojiebang.some((entry) => rankingEntryMatchesPoi(entry, poi));
   const matchedBichi = lists.bichibang.some((entry) => rankingEntryMatchesPoi(entry, poi));
+  const matchedBibendum = lists.bibendum.some((entry) => rankingEntryMatchesPoi(entry, poi));
   const rankingLabels = [];
   let rankingCategory = "";
 
   if (matchedSaojie) rankingLabels.push("扫街榜");
   if (matchedBichi) rankingLabels.push("必吃榜");
+  if (matchedBibendum) rankingLabels.push("必比登");
 
-  if (matchedSaojie && matchedBichi) rankingCategory = "both";
+  if ([matchedSaojie, matchedBichi, matchedBibendum].filter(Boolean).length > 1) rankingCategory = "multi";
   else if (matchedSaojie) rankingCategory = "saojiebang";
   else if (matchedBichi) rankingCategory = "bichibang";
+  else if (matchedBibendum) rankingCategory = "bibendum";
 
   return {
     ...poi,

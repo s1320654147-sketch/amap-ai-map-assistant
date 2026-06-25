@@ -48,11 +48,18 @@ const state = {
   summary: "",
   nearbyRequestId: 0,
   manualPickGuardAt: 0,
-  mapBounds: []
+  mapBounds: [],
+  rankings: {
+    city: "上海",
+    markers: [],
+    mode: "all"
+  }
 };
 
 let map = null;
 let overlays = [];
+let rankingOverlays = [];
+let rankingInfoWindow = null;
 
 const suggestions = [
   {
@@ -173,6 +180,67 @@ function renderToolbar() {
   });
 
   fitMapButton?.addEventListener("click", fitMap);
+  renderRankingToolbar();
+}
+
+function renderRankingToolbar() {
+  const mapWrap = document.querySelector(".map-wrap");
+  if (!mapWrap) return;
+  mapWrap.querySelector(".ranking-toolbar")?.remove();
+
+  const options = [
+    { key: "all", label: "全部榜单" },
+    { key: "bichibang", label: "必吃榜" },
+    { key: "saojiebang", label: "扫街榜" },
+    { key: "bibendum", label: "必比登" },
+    { key: "multi", label: "双榜/多榜" }
+  ];
+
+  const bar = document.createElement("div");
+  bar.className = "ranking-toolbar";
+  bar.innerHTML = options
+    .map(
+      (item) =>
+        `<button type="button" class="ranking-filter ranking-filter--${item.key}${state.rankings.mode === item.key ? " is-active" : ""}" data-mode="${item.key}">${rankingFilterIcon(item.key)}<span>${item.label}</span></button>`
+    )
+    .join("");
+
+  bar.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.rankings.mode = button.dataset.mode || "all";
+      renderRankingToolbar();
+      renderRankingLayer();
+    });
+  });
+
+  mapWrap.appendChild(bar);
+}
+
+function rankingFilterIcon(mode) {
+  if (mode === "bichibang") {
+    return `<img class="ranking-filter-icon" src="/assets/bichibang-logo.jpg" alt="" aria-hidden="true" />`;
+  }
+  if (mode === "saojiebang") {
+    return `<img class="ranking-filter-icon" src="/assets/saojiebang-logo.png" alt="" aria-hidden="true" />`;
+  }
+  if (mode === "bibendum") {
+    return `<img class="ranking-filter-icon" src="/assets/bibendum-logo.jpg" alt="" aria-hidden="true" />`;
+  }
+  if (mode === "multi") {
+    return `
+      <span class="ranking-filter-icon ranking-filter-icon--stack" aria-hidden="true">
+        <img src="/assets/bichibang-logo.jpg" alt="" />
+        <img src="/assets/saojiebang-logo.png" alt="" />
+      </span>
+    `;
+  }
+  return `
+    <span class="ranking-filter-icon ranking-filter-icon--stack ranking-filter-icon--triple" aria-hidden="true">
+      <img src="/assets/bichibang-logo.jpg" alt="" />
+      <img src="/assets/saojiebang-logo.png" alt="" />
+      <img src="/assets/bibendum-logo.jpg" alt="" />
+    </span>
+  `;
 }
 
 function syncToolbarValues() {
@@ -204,6 +272,109 @@ function ensureCityOption(city) {
   syncFilterSelectState();
 }
 
+async function loadRankingLayer() {
+  try {
+    const payload = await apiGet(`/api/rankings/map?city=${encodeURIComponent(state.rankings.city)}`);
+    state.rankings.markers = Array.isArray(payload.markers) ? payload.markers : [];
+    renderRankingLayer();
+    renderRankingEvidence(filterRankingMarkers(state.rankings.markers));
+    if (els.mapTitle) els.mapTitle.textContent = `上海榜单餐厅 · ${filterRankingMarkers(state.rankings.markers).length} 家`;
+    if (!state.history.length && map && state.rankings.markers.length) {
+      map.setCenter(cityCenter(`${state.rankings.city}市`));
+      map.setZoom(11);
+    }
+  } catch {
+    // Keep this layer quiet if ranking data is unavailable.
+  }
+}
+
+function renderRankingLayer() {
+  if (!map) return;
+  rankingOverlays.forEach((overlay) => overlay.setMap(null));
+  rankingOverlays = [];
+
+  const entries = filterRankingMarkers(state.rankings.markers);
+  renderRankingEvidence(entries);
+  if (els.mapTitle) els.mapTitle.textContent = `上海榜单餐厅 · ${entries.length} 家`;
+  entries.forEach((entry) => {
+    if (!entry.location) return;
+    const marker = new window.AMap.Marker({
+      position: parseLocation(entry.location),
+      content: rankingMarkerContent(entry),
+      offset: new window.AMap.Pixel(-16, -34),
+      anchor: "bottom-center",
+      zIndex: 80
+    });
+    marker.on("click", () => openRankingInfo(entry, marker.getPosition()));
+    marker.setMap(map);
+    rankingOverlays.push(marker);
+  });
+}
+
+function renderRankingEvidence(entries) {
+  if (!els.evidence) return;
+  const rows = entries.slice(0, 12);
+  if (!rows.length) {
+    els.evidence.innerHTML = `<p class="empty">当前筛选下没有可展示的榜单店铺。</p>`;
+    return;
+  }
+
+  els.evidence.innerHTML = rows
+    .map((entry, index) =>
+      evidenceRow(
+        index + 1,
+        entry.name,
+        [entry.cuisine, entry.area || entry.district].filter(Boolean).join(" · "),
+        entry.price ? `￥${entry.price}` : "-",
+        (entry.labels || []).join(" / "),
+        "榜单"
+      )
+    )
+    .join("");
+}
+
+function filterRankingMarkers(markers) {
+  if (state.rankings.mode === "all") return markers;
+  if (state.rankings.mode === "multi") return markers.filter((item) => item.rankingCategory === "multi");
+  return markers.filter((item) => Array.isArray(item.categories) && item.categories.includes(state.rankings.mode));
+}
+
+function rankingMarkerContent(entry) {
+  const badges = (entry.categories || []).slice(0, 3).map((key) => {
+    const src =
+      key === "bichibang"
+        ? "/assets/bichibang-logo.jpg"
+        : key === "saojiebang"
+          ? "/assets/saojiebang-logo.png"
+          : "/assets/bibendum-logo.jpg";
+    const label = key === "bichibang" ? "必吃榜" : key === "saojiebang" ? "扫街榜" : "必比登";
+    return `<img src="${src}" alt="${label}" />`;
+  });
+
+  return `
+    <div class="ranking-marker ranking-${escapeHtml(entry.rankingCategory || "single")}">
+      <div class="ranking-marker-badges">${badges.join("")}</div>
+      <div class="ranking-marker-pin"></div>
+    </div>
+  `;
+}
+
+function openRankingInfo(entry, position) {
+  if (!rankingInfoWindow || !map) return;
+  const price = entry.price ? `人均 ${escapeHtml(String(entry.price))}` : "人均未标注";
+  const cuisine = entry.cuisine ? escapeHtml(entry.cuisine) : "菜系未标注";
+  const labels = (entry.labels || []).map((label) => `<span>${escapeHtml(label)}</span>`).join("");
+  rankingInfoWindow.setContent(`
+    <div class="ranking-info-window">
+      <strong>${escapeHtml(entry.name)}</strong>
+      <div class="ranking-info-tags">${labels}</div>
+      <p>${cuisine} · ${price}</p>
+      <p>${escapeHtml([entry.district, entry.area, entry.address].filter(Boolean).join(" · "))}</p>
+    </div>
+  `);
+  rankingInfoWindow.open(map, position);
+}
+
 async function initMap() {
   try {
     const cfg = await apiGet("/api/config");
@@ -224,6 +395,12 @@ async function initMap() {
       doubleClickZoom: false
     });
 
+    rankingInfoWindow = new window.AMap.InfoWindow({
+      offset: new window.AMap.Pixel(0, -24),
+      closeWhenClickMap: true
+    });
+
+    await loadRankingLayer();
     bindManualMapPick();
     await initGeolocation();
   } catch (error) {
@@ -274,7 +451,6 @@ async function initGeolocation() {
     });
 
     await commitLocationFromGeoResult(result);
-    await refreshNearby();
   } catch {
     const fallback = cityCenter(state.filters.city);
     await commitLocation({
@@ -287,7 +463,6 @@ async function initGeolocation() {
     });
     map?.setCenter(fallback);
     map?.setZoom(13);
-    await refreshNearby();
   }
 }
 
@@ -1076,9 +1251,10 @@ function plannerText(planner) {
 function markerClass(rankingCategory, role) {
   if (role === "origin") return "origin";
   if (role === "cluster") return "cluster";
-  if (rankingCategory === "both") return "both";
+  if (rankingCategory === "multi") return "multi";
   if (rankingCategory === "saojiebang") return "saojiebang";
   if (rankingCategory === "bichibang") return "bichibang";
+  if (rankingCategory === "bibendum") return "bibendum";
   return "default";
 }
 
