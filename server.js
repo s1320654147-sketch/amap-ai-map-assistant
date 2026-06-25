@@ -286,15 +286,19 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
 
   if (plan.intent === "nearby") {
     const origin = await resolvePlaceAnchor(plan.address, plan.city);
-    const pois = await searchAround({
+    const pois = await searchAroundWithFallback({
       location: origin.location,
       keywords: plan.keywords,
       radius: plan.radius,
       pageSize: 25,
-      pages: 1
+      pages: 2
     });
-    const taggedPois = tagRankingsForPois(pois);
-    const top = taggedPois.slice(0, 10);
+    const taggedPois = rankPoisForRecommendation(tagRankingsForPois(pois), {
+      keywords: plan.keywords,
+      originLocation: origin.location,
+      question
+    });
+    const top = taggedPois.slice(0, plan.limit || 10);
     return maybeFinalizeAgentResponse({
       intent: "nearby",
       planner: plan.planner,
@@ -307,7 +311,7 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
         pois: taggedPois,
         top
       }),
-      answer: `我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内找到了 ${pois.length} 个「${plan.keywords}」相关地点，优先展示前 ${top.length} 个。`,
+      answer: `我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内找到了 ${taggedPois.length} 个「${plan.keywords}」相关地点，优先展示前 ${top.length} 个。`,
       map: {
         mode: "pois",
         center: origin.location,
@@ -318,7 +322,7 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
         ],
         legends: rankingLegendSummary(top)
       },
-      data: { plan, origin, radius: plan.radius, pois: top },
+      data: { plan, origin, radius: plan.radius, pois: top, allPois: taggedPois.slice(0, 80) },
       source: "DeepSeek/规则解析 + 高德地理编码 + 高德周边搜索",
       context: buildNextContext({ question, plan, origin })
     }, session, options);
@@ -372,7 +376,9 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     pages: plan.countMode ? 6 : 2,
     countMode: plan.countMode
   });
-  const taggedPois = tagRankingsForPois(searchResult.pois);
+  const taggedPois = rankPoisForRecommendation(tagRankingsForPois(searchResult.pois), {
+    keywords: plan.keywords
+  });
   const top = taggedPois.slice(0, 10);
   return maybeFinalizeAgentResponse({
     intent: "search",
@@ -473,9 +479,11 @@ function normalizePlan(rawPlan, question, session = {}) {
     ? "nearby"
     : inferredIntent === "cluster"
       ? "cluster"
-      : ["cluster", "nearby", "route", "search"].includes(rawPlan.intent)
-        ? rawPlan.intent
-        : inferredIntent;
+      : inferredIntent === "nearby"
+        ? "nearby"
+        : ["cluster", "nearby", "route", "search"].includes(rawPlan.intent)
+          ? rawPlan.intent
+          : inferredIntent;
   const city = shouldPreferContextCity(question, context) ? (context.lastCity || inferCity(question, context)) : (rawPlan.city || inferCity(question, context));
   const plan = { intent, city };
 
@@ -491,7 +499,8 @@ function normalizePlan(rawPlan, question, session = {}) {
     const parsed = parseNearbyQuestion(question, context);
     plan.address = cleanupPlace(contextualNearby ? (parsed.address || context.lastAddress) : (rawPlan.address || parsed.address || context.lastAddress));
     plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || "餐饮");
-    plan.radius = clampRadius(rawPlan.radius || parsed.radius, 200, 10000, 2000);
+    plan.radius = clampRadius(hasRadiusConstraint(question) ? parsed.radius : rawPlan.radius || parsed.radius, 200, 10000, 2000);
+    plan.limit = parseRecommendationLimit(question);
     return plan;
   }
 
@@ -517,6 +526,7 @@ function normalizePlan(rawPlan, question, session = {}) {
   const parsed = parseSearchQuestion(question, context);
   plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || question);
   plan.countMode = Boolean(rawPlan.countMode || parsed.countMode);
+  plan.limit = parseRecommendationLimit(question);
   return plan;
 }
 
@@ -658,8 +668,9 @@ async function answerWithAmap(question) {
 
 function inferIntent(question, context = {}) {
   if (shouldUseContextualNearby(question, context)) return "nearby";
-  if (/(多远|多久|步行|走路|路线|怎么走|到.+要多久)/.test(question)) return "route";
-  if (/(附近|周边|旁边|周围)/.test(question)) return "nearby";
+  if (/(?:从|由).+(?:到|去).+(多远|多久|路线|怎么走|要多久)|.+到.+(?:多远|多久|步行多久|路线|怎么走|要多久)/.test(question)) return "route";
+  if (/(附近|周边|旁边|周围|步行\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内|走路\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内)/i.test(question)) return "nearby";
+  if (/(多远|多久|路线|怎么走|到.+要多久)/.test(question)) return "route";
   if (/(同时|都有|又有|兼具|共同|一起有|都拥有)/.test(question)) return "cluster";
   return "search";
 }
@@ -724,8 +735,11 @@ function parseRouteQuestion(question, context = {}) {
 
 function parseNearbyQuestion(question, context = {}) {
   const radiusMatch = question.match(/(\d+(?:\.\d+)?)\s*(公里|千米|km|米|m)/i);
+  const minuteMatch = question.match(/(?:步行|走路)?\s*(\d+(?:\.\d+)?)\s*(分钟|min|mins?)\s*内?/i);
   const radius = radiusMatch
     ? Math.min(10000, Math.max(200, Math.round(Number(radiusMatch[1]) * (/公里|千米|km/i.test(radiusMatch[2]) ? 1000 : 1))))
+    : minuteMatch
+      ? Math.min(10000, walkMinutesToRadius(Number(minuteMatch[1])))
     : 2000;
   const rawAddress = question.match(/(.+?)(?:附近|周边|旁边|周围)/)?.[1];
   const inheritedAddress = /(那附近|这里附近|那里附近|这附近|附近还有|附近再找)/.test(question) ? context.lastAddress : "";
@@ -733,6 +747,17 @@ function parseNearbyQuestion(question, context = {}) {
   const afterNearby = question.split(/附近|周边|旁边|周围/).slice(1).join(" ");
   const keywords = inferNearbyKeyword(afterNearby || question);
   return { address, keywords, radius };
+}
+
+function parseRecommendationLimit(question) {
+  const match = String(question || "").match(/推荐\s*(\d{1,2})\s*(?:个|家|条)?|(\d{1,2})\s*(?:个|家|条)\s*(?:推荐|候选|结果)?/);
+  const number = Number(match?.[1] || match?.[2] || 0);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.min(20, Math.max(1, Math.round(number)));
+}
+
+function hasRadiusConstraint(question) {
+  return /(\d+(?:\.\d+)?)\s*(公里|千米|km|米|m|分钟|min|mins?)/i.test(String(question || ""));
 }
 
 function parseClusterQuestion(question) {
@@ -772,6 +797,10 @@ function parseSearchQuestion(question, context = {}) {
 }
 
 function inferNearbyKeyword(text) {
+  if (/本帮菜|上海菜|沪菜/.test(text)) return "本帮菜";
+  if (/江浙菜|杭帮菜|淮扬菜|粤菜|川菜|湘菜|火锅|烧烤|日料|日本料理|西餐|brunch|早午餐/i.test(text)) {
+    return cleanupPlace(text.match(/本帮菜|上海菜|沪菜|江浙菜|杭帮菜|淮扬菜|粤菜|川菜|湘菜|火锅|烧烤|日料|日本料理|西餐|brunch|早午餐/i)?.[0] || text);
+  }
   if (/吃|餐|饭|美食|餐厅|小吃/.test(text)) return "餐饮";
   if (/咖啡/.test(text)) return "咖啡";
   if (/商场|商圈|购物|买/.test(text)) return "购物中心";
@@ -784,7 +813,7 @@ function cleanupPlace(value) {
   return String(value || "")
     .replace(/[？?。！!]/g, " ")
     .replace(/^(从|在|到|去|离|请问|帮我|查一下|找一下)/, "")
-    .replace(/(附近|周边|旁边|周围|有|有什么|有哪些|吗|呢|呀|吧)$/g, "")
+    .replace(/(附近|周边|旁边|周围|有|有什么|有哪些|吗|呢|呀|吧|帮我推荐\d*个?|推荐\d*个?)$/g, "")
     .trim();
 }
 
@@ -1136,7 +1165,7 @@ async function summarizeWithDeepSeek(result, session = {}) {
           {
             role: "system",
             content:
-              "你是 AI 地图助手。你只能根据提供给你的高德真实结果做总结，不能虚构任何地点、距离、路线、评分、榜单信息。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。输出 JSON：{\"analysis\":\"拟人化回复\",\"answer\":\"一句简明结论\"}。analysis 要用亲切、自然、像真人助理的中文来回答用户，不要机械罗列清单，要结合真实数据给出推荐，并在末尾主动发起下一轮沟通。answer 只保留一句最核心结论。"
+              "你是 AI 地图助手。你只能根据提供给你的高德真实结果做总结，不能虚构任何地点、距离、路线、评分、榜单信息。当前数据没有真实评分字段时，绝对不要说“评分很高”“高分”“口碑评分”等评分判断，只能说距离、地址、品类、电话、榜单标签这些输入中存在的信息。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。输出 JSON：{\"analysis\":\"拟人化回复\",\"answer\":\"一句简明结论\"}。analysis 要用亲切、自然、像真人助理的中文来回答用户，不要机械罗列清单，要结合真实数据给出推荐，并在末尾主动发起下一轮沟通。answer 只保留一句最核心结论。"
           },
           {
             role: "system",
@@ -1184,7 +1213,7 @@ async function streamDeepSeekNarration(result, session = {}, res) {
           {
             role: "system",
             content:
-              "你是 AI 地图助手。请严格根据高德 API 的真实结果回答，不能编造事实。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。回答要亲切、自然、拟人化，像一个会聊天的生活助理，不要机械罗列清单。你需要在结尾主动问用户下一步想继续筛什么。"
+              "你是 AI 地图助手。请严格根据高德 API 的真实结果回答，不能编造事实。当前数据没有真实评分字段时，绝对不要说“评分很高”“高分”“口碑评分”等评分判断，只能说距离、地址、品类、电话、榜单标签这些输入中存在的信息。凡是提到门店、商场、地点名称时，必须逐字使用输入数据里的原始 poi.name 或 title，绝对不要自己改写、简写、补全商场名、猜测分店名，也不要把地址改写成门店名。品牌查询默认表示官方品牌门店；如果原始结果没有明确证明某个点就是该品牌官方门店，就不要把它写进回复。宁可少说，也不要说错。回答要亲切、自然、拟人化，像一个会聊天的生活助理，不要机械罗列清单。你需要在结尾主动问用户下一步想继续筛什么。"
           },
           {
             role: "system",
@@ -1579,12 +1608,104 @@ async function searchAround({ location, keywords, radius = 2000, pageSize = 20, 
   return dedupePois(payloads.flatMap((payload) => payload.pois || []));
 }
 
+async function searchAroundWithFallback({ location, keywords, radius = 2000, pageSize = 20, pages = 1 }) {
+  const primary = await searchAround({ location, keywords, radius, pageSize, pages });
+  if (primary.length >= 3 || !shouldFallbackNearbyKeyword(keywords)) return primary;
+
+  const fallbackKeywords = nearbyFallbackKeywords(keywords);
+  const groups = [primary];
+  for (const keyword of fallbackKeywords) {
+    if (normalizeLooseText(keyword) === normalizeLooseText(keywords)) continue;
+    const results = await searchAround({ location, keywords: keyword, radius, pageSize, pages: 1 });
+    groups.push(results);
+    if (dedupePois(groups.flat()).length >= 10) break;
+  }
+  return dedupePois(groups.flat());
+}
+
+function shouldFallbackNearbyKeyword(keywords) {
+  return /本帮菜|上海菜|沪菜|江浙菜|杭帮菜|淮扬菜|粤菜|川菜|湘菜|火锅|烧烤|日料|日本料理|西餐|brunch|早午餐|餐饮|美食|餐厅/i.test(String(keywords || ""));
+}
+
+function nearbyFallbackKeywords(keywords) {
+  if (/本帮菜|上海菜|沪菜/.test(String(keywords || ""))) return ["本帮菜", "上海菜", "沪菜", "餐饮"];
+  return [keywords, "餐饮", "美食"];
+}
+
+function rankPoisForRecommendation(pois, { keywords = "", originLocation = "", question = "" } = {}) {
+  const prepared = [];
+  for (const poi of pois || []) {
+    if (!hasLocation(poi)) continue;
+    if (isLowConfidenceFoodPoi(keywords, poi, question)) continue;
+    prepared.push({
+      ...poi,
+      recommendationScore: scorePoiForRecommendation(poi, { keywords, originLocation, question })
+    });
+  }
+
+  return dedupeRecommendationPois(prepared).sort((left, right) => {
+    if (right.recommendationScore !== left.recommendationScore) {
+      return right.recommendationScore - left.recommendationScore;
+    }
+    return Number(left.distance || 999999) - Number(right.distance || 999999);
+  });
+}
+
+function scorePoiForRecommendation(poi, { keywords = "", originLocation = "", question = "" } = {}) {
+  const text = normalizeLooseText([poi.name, poi.type, poi.address, poi.district].filter(Boolean).join(" "));
+  const keyword = normalizeLooseText(keywords);
+  let score = 0;
+
+  if (keyword && text.includes(keyword)) score += 40;
+  if (/本帮菜|上海菜|沪菜/.test(String(keywords || "")) && /本帮|上海菜|沪菜|江浙菜/.test([poi.name, poi.type].join(" "))) score += 45;
+  if (Array.isArray(poi.rankingLabels) && poi.rankingLabels.length) score += 70 + poi.rankingLabels.length * 15;
+  if (poi.rankingCategory === "multi") score += 35;
+
+  const distance = Number(poi.distance || (originLocation ? Math.round(distanceMeters(originLocation, poi.location)) : NaN));
+  if (Number.isFinite(distance)) {
+    if (distance <= 500) score += 35;
+    else if (distance <= 900) score += 28;
+    else if (distance <= 1200) score += 20;
+    else if (distance <= 2000) score += 10;
+  }
+
+  if (poi.tel) score += 12;
+  if (poi.address) score += 10;
+  if (poi.district) score += 5;
+  if (/餐饮服务|中餐厅|特色\/地方风味餐厅|美食/.test(String(poi.type || ""))) score += 16;
+  if (/小吃|快餐|便利店|市场|超市|食堂|甜品|饮品|奶茶/.test(String([poi.name, poi.type].join(" ")))) score -= /晚饭|晚餐|两个人|吃饭/.test(question) ? 60 : 25;
+
+  return score;
+}
+
+function isLowConfidenceFoodPoi(keywords, poi, question = "") {
+  const query = `${keywords || ""} ${question || ""}`;
+  if (!/本帮菜|上海菜|沪菜|两个人|晚饭|餐厅|美食|餐饮/.test(query)) return false;
+  const text = String([poi.name, poi.type, poi.address].filter(Boolean).join(" "));
+  if (Array.isArray(poi.rankingLabels) && poi.rankingLabels.length && !/晚饭|晚餐|两个人|吃饭/.test(query)) return false;
+  return /员工餐厅|员工食堂|内部食堂|便利店|生鲜|菜场|市场|水果|彩票|药房|停车场|厕所|ATM|小吃|快餐|饮品|奶茶|甜品/.test(text);
+}
+
+function dedupeRecommendationPois(pois) {
+  const bestByKey = new Map();
+  for (const poi of pois || []) {
+    const key = [normalizeLooseText(poi.name), normalizeLooseText(poi.district), normalizeLooseText(poi.address).slice(0, 12)]
+      .filter(Boolean)
+      .join("|");
+    const current = bestByKey.get(key);
+    if (!current || poi.recommendationScore > current.recommendationScore) {
+      bestByKey.set(key, poi);
+    }
+  }
+  return [...bestByKey.values()];
+}
+
 async function resolvePlaceAnchor(address, city = "") {
   const pois = await searchText({ keywords: address, city, pageSize: 8, pages: 1 });
   const bestPoi = chooseBestAnchorPoi(address, city, pois);
   if (bestPoi?.location) {
     return {
-      formattedAddress: [bestPoi.city || city, bestPoi.district, bestPoi.address].filter(Boolean).join(" "),
+      formattedAddress: compactAddressParts([bestPoi.city || city, bestPoi.district, bestPoi.address]),
       province: "",
       city: bestPoi.city || city,
       district: bestPoi.district || "",
@@ -1594,6 +1715,17 @@ async function resolvePlaceAnchor(address, city = "") {
     };
   }
   return geocode(address, city);
+}
+
+function compactAddressParts(parts) {
+  const results = [];
+  for (const part of parts || []) {
+    const text = textOrEmpty(part).trim();
+    if (!text) continue;
+    if (results.some((item) => item === text || item.includes(text) || text.includes(item))) continue;
+    results.push(text);
+  }
+  return results.join(" ");
 }
 
 function chooseBestAnchorPoi(address, city, pois) {
@@ -1670,6 +1802,10 @@ async function amapGet(endpoint, params) {
       return payload;
     }
 
+    if (isAmapEmptyPlaceResult(payload, endpoint)) {
+      return { ...payload, pois: [] };
+    }
+
     if (isAmapRateLimitError(payload) && attempt < AMAP_RATE_LIMIT_RETRY_COUNT) {
       const backoff = AMAP_RATE_LIMIT_BACKOFF_MS * (attempt + 1);
       nextAmapRequestAt = Math.max(nextAmapRequestAt, Date.now() + backoff);
@@ -1679,6 +1815,11 @@ async function amapGet(endpoint, params) {
 
     throw new Error(payload.info || payload.infocode || "高德接口返回失败");
   }
+}
+
+function isAmapEmptyPlaceResult(payload, endpoint) {
+  const text = `${payload?.info || ""} ${payload?.infocode || ""}`.toUpperCase();
+  return endpoint.includes("/place/") && text.includes("ENGINE_RESPONSE_DATA_ERROR");
 }
 
 function isAmapRateLimitError(payload) {

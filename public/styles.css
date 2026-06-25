@@ -133,6 +133,20 @@ button {
   color: var(--text);
 }
 
+.rail-item.is-disabled,
+.rail-item:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.rail-item.is-disabled em::after {
+  content: "Soon";
+  display: block;
+  margin-top: 1px;
+  font-size: 8px;
+  color: var(--muted);
+}
+
 .rail-spacer {
   flex: 1;
 }
@@ -367,6 +381,33 @@ button {
   background: var(--teal);
   color: #fff;
   font-size: 15px;
+}
+
+.send-fab.is-ready,
+.chat-input button.is-ready {
+  box-shadow: 0 0 0 4px rgba(0, 122, 100, 0.12);
+  transform: translateY(-1px);
+}
+
+.send-fab:disabled,
+.chat-input button:disabled,
+.more-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.input-card-container.has-draft-feedback .send-fab {
+  animation: sendPulse 650ms ease;
+}
+
+@keyframes sendPulse {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-1px) scale(1.08);
+  }
 }
 
 .quick-prompts {
@@ -621,6 +662,18 @@ button {
 body:not(.has-messages) .chat-stream,
 body:not(.has-messages) .chat-input {
   display: none;
+}
+
+body:not(.has-messages) .engine-powered-tag,
+body:not(.has-messages) .context-bar,
+body:not(.has-messages) .search-hint,
+body:not(.has-messages) .ranking-toolbar {
+  display: none;
+}
+
+body:not(.has-messages) .ask-card,
+body:not(.has-messages).mobile-page .mobile-ask {
+  padding-top: 18px;
 }
 
 body.has-messages .context-banner {
@@ -1091,6 +1144,14 @@ body.mobile-page.has-messages .mobile-ask {
   font-size: 11px;
 }
 
+.more-button:not([hidden]):hover {
+  color: var(--teal);
+}
+
+.more-button[hidden] {
+  display: none;
+}
+
 body.mobile-page {
   overflow: auto;
 }
@@ -1185,7 +1246,7 @@ body.mobile-page {
 .mobile-evidence {
   min-height: 220px;
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr) 38px;
   overflow: hidden;
 }
 

@@ -15,6 +15,7 @@ const els = {
   heroAskCard: $("#heroAskCard"),
   followupInputBar: $("#followupInputBar"),
   quickPrompts: $("#quickPrompts"),
+  moreButton: $(".more-button"),
   contextResetButton: $("#contextResetButton"),
   contextResetBannerButton: $("#contextResetBannerButton"),
   searchHint: $("#searchHint"),
@@ -53,7 +54,11 @@ const state = {
     city: "上海",
     markers: [],
     mode: "all"
-  }
+  },
+  evidenceRows: [],
+  evidenceInitialLimit: 6,
+  evidenceExpanded: false,
+  isAsking: false
 };
 
 let map = null;
@@ -101,8 +106,13 @@ function bindEvents() {
   els.questionInput?.addEventListener("keydown", handleQuestionKeydown);
   els.inlineSend?.addEventListener("click", handleInlineSend);
   els.inlineInput?.addEventListener("keydown", handleInlineKeydown);
+  els.questionInput?.addEventListener("input", syncDraftState);
+  els.inlineInput?.addEventListener("input", syncDraftState);
+  els.moreButton?.addEventListener("click", toggleEvidenceRows);
   els.contextResetButton?.addEventListener("click", resetContext);
   els.contextResetBannerButton?.addEventListener("click", resetContext);
+  syncDraftState();
+  setAskingState(false);
 }
 
 function restoreLocation() {
@@ -313,14 +323,14 @@ function renderRankingLayer() {
 
 function renderRankingEvidence(entries) {
   if (!els.evidence) return;
-  const rows = entries.slice(0, 12);
+  const rows = entries;
   if (!rows.length) {
-    els.evidence.innerHTML = `<p class="empty">当前筛选下没有可展示的榜单店铺。</p>`;
+    setEvidenceNotice("当前筛选下没有可展示的榜单店铺。");
     return;
   }
 
-  els.evidence.innerHTML = rows
-    .map((entry, index) =>
+  setEvidenceRows(
+    rows.map((entry, index) =>
       evidenceRow(
         index + 1,
         entry.name,
@@ -329,8 +339,9 @@ function renderRankingEvidence(entries) {
         (entry.labels || []).join(" / "),
         "榜单"
       )
-    )
-    .join("");
+    ),
+    8
+  );
 }
 
 function filterRankingMarkers(markers) {
@@ -640,23 +651,23 @@ function renderNearbyEvidence(payload) {
   if (!els.evidence) return;
   const pois = Array.isArray(payload.pois) ? payload.pois : [];
   if (!pois.length) {
-    els.evidence.innerHTML = `<p class="empty">没有找到可展示的周边结果。</p>`;
+    setEvidenceNotice("没有找到可展示的周边结果。");
     return;
   }
 
-  els.evidence.innerHTML = pois
-    .slice(0, 6)
-    .map((poi, index) =>
+  setEvidenceRows(
+    pois.map((poi, index) =>
       evidenceRow(
         index + 1,
         poi.name,
         [poi.district, poi.address].filter(Boolean).join(" "),
         poi.distance ? `${poi.distance}m` : "-",
-        state.filters.category,
+        poi.rankingLabels?.length ? poi.rankingLabels.join(" / ") : state.filters.category,
         "高德"
       )
-    )
-    .join("");
+    ),
+    6
+  );
 }
 
 function renderSuggestions() {
@@ -670,6 +681,9 @@ function renderSuggestions() {
       const question = button.dataset.question || "";
       if (!els.questionInput) return;
       els.questionInput.value = els.questionInput.value.trim() ? `${els.questionInput.value.trim()} ${question}` : question;
+      els.heroAskCard?.classList.add("has-draft-feedback");
+      window.setTimeout(() => els.heroAskCard?.classList.remove("has-draft-feedback"), 650);
+      syncDraftState();
       els.questionInput.focus();
     });
   });
@@ -714,25 +728,31 @@ function currentAreaLabel() {
 
 async function handleQuestionSubmit(event) {
   event.preventDefault();
+  if (state.isAsking) return;
   const question = els.questionInput?.value.trim();
   if (!question) return;
   if (els.questionInput) els.questionInput.value = "";
+  syncDraftState();
   await askAgent(question);
 }
 
 async function handleQuestionKeydown(event) {
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
+  if (state.isAsking) return;
   const question = els.questionInput?.value.trim();
   if (!question) return;
   if (els.questionInput) els.questionInput.value = "";
+  syncDraftState();
   await askAgent(question);
 }
 
 async function handleInlineSend() {
+  if (state.isAsking) return;
   const question = els.inlineInput?.value.trim();
   if (!question) return;
   els.inlineInput.value = "";
+  syncDraftState();
   await askAgent(question);
 }
 
@@ -743,6 +763,8 @@ async function handleInlineKeydown(event) {
 }
 
 async function askAgent(question) {
+  if (state.isAsking) return;
+  setAskingState(true);
   state.history.push({ role: "user", content: question });
   appendMessage("user", question);
   updateChatMode();
@@ -754,12 +776,6 @@ async function askAgent(question) {
     pending: true
   });
   setStatus("查询中");
-
-  const sendButton = els.form?.querySelector(".send-fab");
-  if (sendButton) {
-    sendButton.disabled = true;
-    sendButton.textContent = "...";
-  }
 
   try {
     const payload = await streamAgentReply(
@@ -792,10 +808,7 @@ async function askAgent(question) {
     });
     setStatus("失败");
   } finally {
-    if (sendButton) {
-      sendButton.disabled = false;
-      sendButton.textContent = "➤";
-    }
+    setAskingState(false);
   }
 }
 
@@ -1072,12 +1085,11 @@ function renderAgentMap(payload) {
 
 function renderAgentEvidence(payload) {
   if (!els.evidence) return;
-  const pois = payload.data?.pois || [];
+  const pois = Array.isArray(payload.data?.allPois) && payload.data.allPois.length ? payload.data.allPois : payload.data?.pois || [];
 
   if ((payload.intent === "nearby" || payload.intent === "search") && pois.length) {
-    els.evidence.innerHTML = pois
-      .slice(0, 6)
-      .map((poi, index) =>
+    setEvidenceRows(
+      pois.map((poi, index) =>
         evidenceRow(
           index + 1,
           poi.name,
@@ -1086,28 +1098,33 @@ function renderAgentEvidence(payload) {
           poi.rankingLabels?.length ? poi.rankingLabels.join(" / ") : state.filters.category,
           "高德"
         )
-      )
-      .join("");
+      ),
+      6
+    );
     return;
   }
 
   if (payload.intent === "cluster" && Array.isArray(payload.data?.matches)) {
-    els.evidence.innerHTML = payload.data.matches.length
-      ? payload.data.matches
-          .slice(0, 10)
-          .map((match, index) => evidenceRow(index + 1, match.title, "多条件组合", `${match.maxPairDistanceMeters}m`, "4.6", "高德"))
-          .join("")
-      : `<p class="empty">没有找到满足条件的组合。</p>`;
+    if (payload.data.matches.length) {
+      setEvidenceRows(
+        payload.data.matches.map((match, index) =>
+          evidenceRow(index + 1, match.title, "多条件组合", `${match.maxPairDistanceMeters}m`, "组合", "高德")
+        ),
+        10
+      );
+    } else {
+      setEvidenceNotice("没有找到满足条件的组合。");
+    }
     return;
   }
 
   if (payload.intent === "route" && payload.data?.route) {
     const route = payload.data.route;
-    els.evidence.innerHTML = evidenceRow(1, "步行路线", "高德步行路径规划", `${route.distanceMeters}m`, `${Math.round(route.durationSeconds / 60)}min`, "高德");
+    setEvidenceRows([evidenceRow(1, "步行路线", "高德步行路径规划", `${route.distanceMeters}m`, `${Math.round(route.durationSeconds / 60)}min`, "高德")], 1);
     return;
   }
 
-  els.evidence.innerHTML = `<p class="empty">${escapeHtml(payload.source || "暂无证据")}</p>`;
+  setEvidenceNotice(payload.source || "暂无证据");
 }
 
 function evidenceRow(rank, name, address, distance, score, source) {
@@ -1121,6 +1138,69 @@ function evidenceRow(rank, name, address, distance, score, source) {
       <b>${escapeHtml(source)}</b>
     </article>
   `;
+}
+
+function setEvidenceRows(rows, initialLimit = 6) {
+  state.evidenceRows = Array.isArray(rows) ? rows : [];
+  state.evidenceInitialLimit = initialLimit;
+  state.evidenceExpanded = state.evidenceRows.length <= initialLimit;
+  renderEvidenceRows();
+}
+
+function setEvidenceNotice(message) {
+  state.evidenceRows = [];
+  state.evidenceExpanded = false;
+  if (els.evidence) els.evidence.innerHTML = `<p class="empty">${escapeHtml(message)}</p>`;
+  updateMoreButton();
+}
+
+function renderEvidenceRows() {
+  if (!els.evidence) return;
+  const visibleCount = state.evidenceExpanded ? state.evidenceRows.length : state.evidenceInitialLimit;
+  els.evidence.innerHTML = state.evidenceRows.slice(0, visibleCount).join("");
+  updateMoreButton();
+}
+
+function toggleEvidenceRows() {
+  if (!state.evidenceRows.length || state.evidenceRows.length <= state.evidenceInitialLimit) return;
+  state.evidenceExpanded = !state.evidenceExpanded;
+  renderEvidenceRows();
+}
+
+function updateMoreButton() {
+  if (!els.moreButton) return;
+  const total = state.evidenceRows.length;
+  const canExpand = total > state.evidenceInitialLimit;
+  els.moreButton.hidden = !canExpand;
+  els.moreButton.disabled = !canExpand;
+  if (!canExpand) {
+    els.moreButton.textContent = "查看更多";
+    return;
+  }
+  els.moreButton.textContent = state.evidenceExpanded ? "收起" : `查看更多（${total - state.evidenceInitialLimit}）`;
+}
+
+function setAskingState(isAsking) {
+  state.isAsking = isAsking;
+  document.body.classList.toggle("is-asking", isAsking);
+  const sendButton = els.form?.querySelector(".send-fab");
+  if (sendButton) {
+    sendButton.disabled = isAsking;
+    sendButton.textContent = isAsking ? "..." : "➤";
+  }
+  if (els.inlineSend) {
+    els.inlineSend.disabled = isAsking;
+    els.inlineSend.textContent = isAsking ? "..." : "➤";
+  }
+  syncDraftState();
+}
+
+function syncDraftState() {
+  const hasMainDraft = Boolean(els.questionInput?.value.trim());
+  const hasInlineDraft = Boolean(els.inlineInput?.value.trim());
+  const sendButton = els.form?.querySelector(".send-fab");
+  sendButton?.classList.toggle("is-ready", hasMainDraft && !state.isAsking);
+  els.inlineSend?.classList.toggle("is-ready", hasInlineDraft && !state.isAsking);
 }
 
 function renderMapLegend() {
@@ -1137,8 +1217,7 @@ function renderMapLegend() {
 }
 
 function renderEvidenceNotice(message) {
-  if (!els.evidence) return;
-  els.evidence.insertAdjacentHTML("afterbegin", `<p class="empty">${escapeHtml(message)}</p>`);
+  setEvidenceNotice(message);
 }
 
 function clearMap() {
