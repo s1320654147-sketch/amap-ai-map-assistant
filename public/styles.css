@@ -414,12 +414,13 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 2px;
+  padding-top: 8px;
   width: 100%;
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  overflow-x: hidden;
+  overflow: visible;
 }
 
 .shortcut-tag {
@@ -441,6 +442,8 @@ button {
   border-color: var(--teal);
   color: var(--teal);
   transform: translateY(-2px);
+  position: relative;
+  z-index: 3;
 }
 
 .search-hint {

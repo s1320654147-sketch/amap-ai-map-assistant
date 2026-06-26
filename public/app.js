@@ -31,6 +31,8 @@ const FILTERS = {
   defaultCategory: "美食"
 };
 
+const RANKING_CITY_NAMES = new Set(["上海", "上海市"]);
+
 const state = {
   location: {
     city: FILTERS.defaultCity,
@@ -172,21 +174,21 @@ function renderToolbar() {
     state.filters.city = citySelect.value;
     syncFilterSelectState();
     renderContext();
-    await refreshNearby();
+    await refreshLocalResults();
   });
 
   walkSelect.addEventListener("change", async () => {
     state.filters.walkMinutes = Number(walkSelect.value);
     syncFilterSelectState();
     renderContext();
-    await refreshNearby();
+    await refreshLocalResults();
   });
 
   categorySelect.addEventListener("change", async () => {
     state.filters.category = categorySelect.value;
     syncFilterSelectState();
     renderContext();
-    await refreshNearby();
+    await refreshLocalResults();
   });
 
   fitMapButton?.addEventListener("click", fitMap);
@@ -284,32 +286,73 @@ function ensureCityOption(city) {
 
 async function loadRankingLayer() {
   try {
-    const payload = await apiGet(`/api/rankings/map?city=${encodeURIComponent(state.rankings.city)}`);
+    const city = rankingCityName(state.location.city || state.filters.city);
+    if (!city) return false;
+    state.rankings.city = city;
+    const payload = await apiGet(`/api/rankings/map?city=${encodeURIComponent(city)}`);
     state.rankings.markers = Array.isArray(payload.markers) ? payload.markers : [];
     renderRankingLayer();
-    renderRankingEvidence(filterRankingMarkers(state.rankings.markers));
-    if (els.mapTitle) els.mapTitle.textContent = `上海榜单餐厅 · ${filterRankingMarkers(state.rankings.markers).length} 家`;
-    if (!state.history.length && map && state.rankings.markers.length) {
-      map.setCenter(cityCenter(`${state.rankings.city}市`));
-      map.setZoom(11);
-    }
+    return true;
   } catch {
     // Keep this layer quiet if ranking data is unavailable.
+    return false;
   }
+}
+
+async function refreshLocalResults() {
+  syncRankingToolbarVisibility();
+  if (hasRankingDataForCurrentCity() && Array.isArray(state.location.location)) {
+    const loaded = state.rankings.markers.length && state.rankings.city === rankingCityName(state.location.city || state.filters.city)
+      ? (renderRankingLayer(), true)
+      : await loadRankingLayer();
+    if (loaded) return;
+  }
+  await refreshNearby();
 }
 
 function renderRankingLayer() {
   if (!map) return;
+  clearMap();
   rankingOverlays.forEach((overlay) => overlay.setMap(null));
   rankingOverlays = [];
 
-  const entries = filterRankingMarkers(state.rankings.markers);
+  const entries = localRankingEntries();
   renderRankingEvidence(entries);
-  if (els.mapTitle) els.mapTitle.textContent = `上海榜单餐厅 · ${entries.length} 家`;
+  if (els.mapTitle) els.mapTitle.textContent = `${rankingCityName(state.location.city || state.filters.city)}周边榜单 · ${entries.length} 家`;
+  const bounds = [];
+  if (Array.isArray(state.location.location)) {
+    const origin = state.location.location;
+    bounds.push(origin);
+    const originMarker = new window.AMap.Marker({
+      position: origin,
+      title: state.location.formattedAddress || state.location.address || "当前位置",
+      label: {
+        content: `<div class="map-label origin">我</div>`,
+        direction: "top"
+      }
+    });
+    originMarker.setMap(map);
+    rankingOverlays.push(originMarker);
+
+    const circle = new window.AMap.Circle({
+      center: origin,
+      radius: walkMinutesToRadius(state.filters.walkMinutes),
+      strokeColor: "#008f81",
+      strokeOpacity: 0.66,
+      strokeWeight: 2,
+      strokeStyle: "dashed",
+      fillColor: "#008f81",
+      fillOpacity: 0.08
+    });
+    circle.setMap(map);
+    rankingOverlays.push(circle);
+  }
   entries.forEach((entry) => {
     if (!entry.location) return;
+    const point = parseLocation(entry.location);
+    bounds.push(point);
     const marker = new window.AMap.Marker({
-      position: parseLocation(entry.location),
+      position: point,
       content: rankingMarkerContent(entry),
       offset: new window.AMap.Pixel(-16, -34),
       anchor: "bottom-center",
@@ -319,6 +362,9 @@ function renderRankingLayer() {
     marker.setMap(map);
     rankingOverlays.push(marker);
   });
+  state.mapBounds = bounds;
+  fitMap();
+  renderMapLegend();
 }
 
 function renderRankingEvidence(entries) {
@@ -335,9 +381,9 @@ function renderRankingEvidence(entries) {
         index + 1,
         entry.name,
         [entry.cuisine, entry.area || entry.district].filter(Boolean).join(" · "),
-        entry.price ? `￥${entry.price}` : "-",
-        (entry.labels || []).join(" / "),
-        "榜单"
+        formatDistance(entry.distanceMeters),
+        formatRating(entry.rating),
+        (entry.labels || []).join(" / ") || "榜单"
       )
     ),
     8
@@ -348,6 +394,33 @@ function filterRankingMarkers(markers) {
   if (state.rankings.mode === "all") return markers;
   if (state.rankings.mode === "multi") return markers.filter((item) => item.rankingCategory === "multi");
   return markers.filter((item) => Array.isArray(item.categories) && item.categories.includes(state.rankings.mode));
+}
+
+function localRankingEntries() {
+  if (!hasRankingDataForCurrentCity() || !Array.isArray(state.location.location)) return [];
+  const radius = walkMinutesToRadius(state.filters.walkMinutes);
+  return filterRankingMarkers(state.rankings.markers)
+    .map((entry) => ({
+      ...entry,
+      distanceMeters: entry.location ? Math.round(distanceBetweenPoints(state.location.location, parseLocation(entry.location))) : Number.POSITIVE_INFINITY
+    }))
+    .filter((entry) => Number.isFinite(entry.distanceMeters) && entry.distanceMeters <= radius)
+    .sort((left, right) => left.distanceMeters - right.distanceMeters);
+}
+
+function hasRankingDataForCurrentCity() {
+  return Boolean(rankingCityName(state.location.city || state.filters.city));
+}
+
+function rankingCityName(city) {
+  const normalized = normalizeCityDisplay(city);
+  if (!RANKING_CITY_NAMES.has(normalized)) return "";
+  return "上海";
+}
+
+function syncRankingToolbarVisibility() {
+  const toolbar = document.querySelector(".ranking-toolbar");
+  if (toolbar) toolbar.hidden = !hasRankingDataForCurrentCity();
 }
 
 function rankingMarkerContent(entry) {
@@ -411,7 +484,6 @@ async function initMap() {
       closeWhenClickMap: true
     });
 
-    await loadRankingLayer();
     bindManualMapPick();
     await initGeolocation();
   } catch (error) {
@@ -434,7 +506,7 @@ function bindManualMapPick() {
     const point = [lng, lat];
     await commitLocationFromPoint(point, "manual-pick");
     map.setCenter(point);
-    await refreshNearby();
+    await refreshLocalResults();
   };
 
   map.on("click", pickHandler);
@@ -462,6 +534,7 @@ async function initGeolocation() {
     });
 
     await commitLocationFromGeoResult(result);
+    await refreshLocalResults();
   } catch {
     const fallback = cityCenter(state.filters.city);
     await commitLocation({
@@ -474,6 +547,7 @@ async function initGeolocation() {
     });
     map?.setCenter(fallback);
     map?.setZoom(13);
+    await refreshLocalResults();
   }
 }
 
@@ -589,7 +663,7 @@ async function refreshNearby() {
 function renderNearbyMap(payload) {
   clearMap();
 
-  const pois = Array.isArray(payload.pois) ? payload.pois : [];
+  const pois = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []);
   const bounds = [];
   const origin = payload.origin?.location ? parseLocation(payload.origin.location) : state.location.location;
 
@@ -649,7 +723,7 @@ function renderNearbyMap(payload) {
 
 function renderNearbyEvidence(payload) {
   if (!els.evidence) return;
-  const pois = Array.isArray(payload.pois) ? payload.pois : [];
+  const pois = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []);
   if (!pois.length) {
     setEvidenceNotice("没有找到可展示的周边结果。");
     return;
@@ -661,8 +735,8 @@ function renderNearbyEvidence(payload) {
         index + 1,
         poi.name,
         [poi.district, poi.address].filter(Boolean).join(" "),
-        poi.distance ? `${poi.distance}m` : "-",
-        poi.rankingLabels?.length ? poi.rankingLabels.join(" / ") : state.filters.category,
+        formatDistance(poi.distance),
+        formatRating(poi.rating),
         "高德"
       )
     ),
@@ -717,13 +791,68 @@ function updateChatMode() {
 function resetContext() {
   state.history = [];
   state.summary = "";
+  if (els.conversation) els.conversation.innerHTML = "";
+  state.mapBounds = [];
+  clearMap();
+  document.querySelector(".map-legend")?.remove();
+  setEvidenceNotice("上下文已重置。你可以重新输入地点需求。");
+  if (els.mapTitle) els.mapTitle.textContent = "📍 我的周边";
+  if (els.plannerBadge) els.plannerBadge.textContent = "DeepSeek 解析";
   updateChatMode();
   renderContext();
+  renderSuggestions();
   els.questionInput?.focus();
 }
 
 function currentAreaLabel() {
-  return state.location.district || state.location.city || state.filters.city || "当前位置";
+  return compactAreaLabel({
+    city: state.location.city || state.filters.city,
+    district: state.location.district,
+    address: state.location.formattedAddress || state.location.address
+  });
+}
+
+function compactAreaLabel({ city, district, address }) {
+  const cleanCity = cleanText(city);
+  const cleanDistrict = cleanText(district);
+  const cleanAddress = cleanText(address);
+  if (cleanCity && cleanDistrict) {
+    if (cleanCity.includes(cleanDistrict)) return cleanCity;
+    return `${cleanCity}${cleanDistrict}`;
+  }
+  if (cleanDistrict) return cleanDistrict;
+  if (cleanAddress) return trimAddressForPrompt(cleanAddress);
+  return cleanCity || "当前位置";
+}
+
+function trimAddressForPrompt(address) {
+  const text = cleanText(address).replace(/\s+/g, "");
+  if (!text) return "";
+  const districtMatch = text.match(/([^省市区县旗]+[区县旗])/);
+  if (districtMatch) return districtMatch[1];
+  return text.length > 14 ? text.slice(0, 14) : text;
+}
+
+function clearResultSurface(message = "正在查询...") {
+  state.mapBounds = [];
+  clearMap();
+  document.querySelector(".map-legend")?.remove();
+  setEvidenceNotice(message);
+  if (els.mapTitle) els.mapTitle.textContent = "正在查询";
+}
+
+function friendlyErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/ENGINE_RESPONSE_DATA_ERROR|没有返回完整结果|500|502|503|504|HTTP 5/i.test(raw)) {
+    return "这次地图数据没有稳定返回。你可以换个更具体的地点或稍后再试，我不会把旧结果当成新答案。";
+  }
+  if (/timeout|超时|fetch failed|网络|Failed to fetch/i.test(raw)) {
+    return "这次网络有点不稳，地图数据暂时没取完整。你可以稍后重试，或者把地点说得更具体一点。";
+  }
+  if (/起点|终点|路线|怎么走|识别/.test(raw)) {
+    return "我还没稳稳识别出起点和终点。你可以换成“从某地到某地怎么走”再试一次。";
+  }
+  return `这次查询没有稳定完成：${raw || "请换个更具体的问法再试一次。"}`;
 }
 
 async function handleQuestionSubmit(event) {
@@ -765,6 +894,7 @@ async function handleInlineKeydown(event) {
 async function askAgent(question) {
   if (state.isAsking) return;
   setAskingState(true);
+  clearResultSurface("正在获取新的地点证据...");
   state.history.push({ role: "user", content: question });
   appendMessage("user", question);
   updateChatMode();
@@ -802,7 +932,7 @@ async function askAgent(question) {
     requestAnimationFrame(() => els.inlineInput?.focus());
   } catch (error) {
     thinking.remove();
-    appendMessage("assistant", `查询失败：${error instanceof Error ? error.message : String(error)}`, {
+    appendMessage("assistant", friendlyErrorMessage(error), {
       title: "查询失败",
       icon: "green"
     });
@@ -1016,7 +1146,10 @@ function applyServerContext(context) {
   if (context.lastResolvedOrigin) state.location.formattedAddress = String(context.lastResolvedOrigin);
   if (context.lastKeywords) state.filters.category = String(context.lastKeywords);
   if (context.lastWalkMinutes) state.filters.walkMinutes = Number(context.lastWalkMinutes) || state.filters.walkMinutes;
-  if (context.lastLocation && !state.location.location) {
+  if (context.lastRadius && !context.lastWalkMinutes) {
+    state.filters.walkMinutes = Math.max(5, Math.round(Number(context.lastRadius) / 80)) || state.filters.walkMinutes;
+  }
+  if (context.lastLocation) {
     const parsed = parseLocation(context.lastLocation);
     if (parsed.length === 2 && parsed.every((v) => Number.isFinite(v))) {
       state.location.location = parsed;
@@ -1085,17 +1218,17 @@ function renderAgentMap(payload) {
 
 function renderAgentEvidence(payload) {
   if (!els.evidence) return;
-  const pois = Array.isArray(payload.data?.allPois) && payload.data.allPois.length ? payload.data.allPois : payload.data?.pois || [];
+  const pois = sortPoisByDistance(Array.isArray(payload.data?.allPois) && payload.data.allPois.length ? payload.data.allPois : payload.data?.pois || []);
 
-  if ((payload.intent === "nearby" || payload.intent === "search") && pois.length) {
+  if ((payload.intent === "nearby" || payload.intent === "search" || payload.intent === "travel") && pois.length) {
     setEvidenceRows(
       pois.map((poi, index) =>
         evidenceRow(
           index + 1,
           poi.name,
           [poi.district, poi.address].filter(Boolean).join(" "),
-          poi.distance ? `${poi.distance}m` : "-",
-          poi.rankingLabels?.length ? poi.rankingLabels.join(" / ") : state.filters.category,
+          formatDistance(poi.distance),
+          formatRating(poi.rating),
           "高德"
         )
       ),
@@ -1138,6 +1271,43 @@ function evidenceRow(rank, name, address, distance, score, source) {
       <b>${escapeHtml(source)}</b>
     </article>
   `;
+}
+
+function sortPoisByDistance(pois) {
+  return [...(pois || [])].sort((left, right) => numericDistance(left.distance) - numericDistance(right.distance));
+}
+
+function numericDistance(distance) {
+  const value = Number(distance);
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
+}
+
+function formatDistance(distance) {
+  const meters = Number(distance);
+  if (!Number.isFinite(meters)) return "-";
+  if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}km`;
+  return `${Math.round(meters)}m`;
+}
+
+function formatRating(rating) {
+  const text = String(rating || "").trim();
+  if (!text || text === "0" || text === "[]") return "-";
+  return text;
+}
+
+function distanceBetweenPoints(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length < 2 || b.length < 2) return Number.POSITIVE_INFINITY;
+  const [lng1, lat1] = a.map(Number);
+  const [lng2, lat2] = b.map(Number);
+  if (![lng1, lat1, lng2, lat2].every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  const toRad = (degrees) => (degrees * Math.PI) / 180;
+  const earthRadius = 6371008.8;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
 }
 
 function setEvidenceRows(rows, initialLimit = 6) {
@@ -1223,6 +1393,8 @@ function renderEvidenceNotice(message) {
 function clearMap() {
   overlays.forEach((overlay) => overlay.setMap(null));
   overlays = [];
+  rankingOverlays.forEach((overlay) => overlay.setMap(null));
+  rankingOverlays = [];
 }
 
 function fitMap() {
@@ -1231,7 +1403,7 @@ function fitMap() {
     map.setZoomAndCenter(15, state.mapBounds[0]);
     return;
   }
-  map.setFitView(overlays, false, [80, 80, 80, 80], 16);
+  map.setFitView([...overlays, ...rankingOverlays], false, [80, 80, 80, 80], 16);
 }
 
 function apiGet(path) {
@@ -1318,6 +1490,7 @@ function intentLabel(intent) {
   return {
     cluster: "高德返回证据",
     nearby: "高德返回证据",
+    travel: "旅行候选",
     route: "路线证据",
     search: "搜索证据"
   }[intent] || "高德返回证据";
@@ -1357,7 +1530,8 @@ function normalizeCityName(value) {
   const text = cleanText(value);
   if (!text) return state.filters.city || FILTERS.defaultCity;
   if (["北京", "上海", "天津", "重庆"].includes(text)) return `${text}市`;
-  return text.endsWith("市") ? text : `${text}市`;
+  if (/(市|区|县|旗|盟|州|地区|特别行政区)$/.test(text)) return text;
+  return `${text}市`;
 }
 
 function cleanText(value) {

@@ -142,7 +142,7 @@ async function handleApi(req, url, res) {
       console.error(`[agent:${requestId}] stream-error`, error);
       writeSse(res, "error", {
         ok: false,
-        error: error instanceof Error ? error.message : "未知错误"
+        error: productErrorMessage(error)
       });
     } finally {
       res.end();
@@ -257,31 +257,35 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
   const plan = await planQuestion(question, session);
 
   if (plan.intent === "route") {
-    const origin = await geocode(plan.from, plan.city);
-    const destination = await geocode(plan.to, plan.city);
-    const route = await walkingRoute(origin.location, destination.location);
-    const minutes = Math.round(route.durationSeconds / 60);
-    const kilometers = (route.distanceMeters / 1000).toFixed(2);
-    return maybeFinalizeAgentResponse({
-      intent: "route",
-      planner: plan.planner,
-      question,
-      city: plan.city,
-      analysis: buildRouteAnalysis({ origin, destination, kilometers, minutes }),
-      answer: `${origin.formattedAddress} 到 ${destination.formattedAddress} 步行约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
-      map: {
-        mode: "route",
-        center: centerLocation([origin.location, destination.location]),
-        markers: [
-          { label: "起", title: origin.formattedAddress, location: origin.location },
-          { label: "终", title: destination.formattedAddress, location: destination.location }
-        ],
-        route: { origin: origin.location, destination: destination.location }
-      },
-      data: { plan, origin, destination, route },
-      source: "DeepSeek/规则解析 + 高德地理编码 + 高德步行路径规划",
-      context: buildNextContext({ question, plan, origin, destination })
-    }, session, options);
+    try {
+      const origin = await resolvePlaceAnchor(plan.from, plan.city);
+      const destination = await resolvePlaceAnchor(plan.to, plan.city);
+      const route = await walkingRoute(origin.location, destination.location);
+      const minutes = Math.round(route.durationSeconds / 60);
+      const kilometers = (route.distanceMeters / 1000).toFixed(2);
+      return maybeFinalizeAgentResponse({
+        intent: "route",
+        planner: plan.planner,
+        question,
+        city: plan.city,
+        analysis: buildRouteAnalysis({ origin, destination, kilometers, minutes }),
+        answer: `${origin.formattedAddress} 到 ${destination.formattedAddress} 步行约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
+        map: {
+          mode: "route",
+          center: centerLocation([origin.location, destination.location]),
+          markers: [
+            { label: "起", title: origin.formattedAddress, location: origin.location },
+            { label: "终", title: destination.formattedAddress, location: destination.location }
+          ],
+          route: { origin: origin.location, destination: destination.location }
+        },
+        data: { plan, origin, destination, route },
+        source: "DeepSeek/规则解析 + 高德地理编码 + 高德步行路径规划",
+        context: buildNextContext({ question, plan, origin, destination })
+      }, session, options);
+    } catch (error) {
+      return routeFallbackResponse({ question, plan, error }, session, options);
+    }
   }
 
   if (plan.intent === "nearby") {
@@ -369,6 +373,30 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     }, session, options);
   }
 
+  if (plan.intent === "travel") {
+    const pois = await findTravelCandidates(plan, question);
+    const top = pois.slice(0, plan.limit || 8);
+    return maybeFinalizeAgentResponse({
+      intent: "travel",
+      planner: plan.planner,
+      question,
+      city: plan.city,
+      analysis: buildTravelAnalysis({ city: plan.city, theme: plan.theme, pois, top }),
+      answer: top.length
+        ? `我先按「${plan.theme}」在${plan.city}找到 ${pois.length} 个真实地点候选，当前展示前 ${top.length} 个，适合再排成轻松行程。`
+        : `我暂时没有在${plan.city}找到足够稳定的「${plan.theme}」候选，可以换个更具体的区域或偏好再查。`,
+      map: {
+        mode: "pois",
+        center: top[0]?.location || defaultCityCenter(plan.city),
+        markers: top.map((poi, index) => poiToMarker(poi, String(index + 1))),
+        legends: rankingLegendSummary(top)
+      },
+      data: { plan, pois: top, allPois: pois.slice(0, 80) },
+      source: "DeepSeek/规则解析 + 高德关键字搜索 + 旅行候选排序",
+      context: buildNextContext({ question, plan })
+    }, session, options);
+  }
+
   const searchResult = await searchTextWithMeta({
     keywords: plan.keywords,
     city: plan.city,
@@ -442,7 +470,7 @@ async function planQuestionWithDeepSeek(question, session = {}) {
         {
           role: "system",
           content:
-            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边；route 用于多远/多久/路线；search 用于普通搜索。城市缺省用上海。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city 和 address。重要约束：当用户提到具体品牌名时，默认理解为该品牌的官方门店/官方品牌点，而不是商场名、广场名、配送站、云仓、员工餐厅、内部食堂、奥莱、mini 或地址描述。若用户说“山姆”“大疆”“蜜雪冰城”“喜茶”等品牌，优先按官方品牌门店理解。"
+            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|travel|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"theme\":\"旅行或场景主题\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边；route 只用于明确起点到终点的多远/多久/路线；travel 用于旅行规划、一天行程、下雨去哪里、不太累、适合散步、朋友聚餐等场景化去哪儿问题，travel 只返回真实地点候选，不要假装完整路线；search 用于普通搜索。城市缺省用上海。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city 和 address。重要约束：当用户提到具体品牌名时，默认理解为该品牌的官方门店/官方品牌点，而不是商场名、广场名、配送站、云仓、员工餐厅、内部食堂、奥莱、mini 或地址描述。若用户说“山姆”“大疆”“蜜雪冰城”“喜茶”等品牌，优先按官方品牌门店理解。"
         },
         {
           role: "system",
@@ -468,6 +496,7 @@ function planQuestionWithRules(question, session = {}) {
   if (intent === "route") return normalizePlan({ intent, city, ...parseRouteQuestion(question, session.context) }, question, session);
   if (intent === "nearby") return normalizePlan({ intent, city, ...parseNearbyQuestion(question, session.context) }, question, session);
   if (intent === "cluster") return normalizePlan({ intent, city, ...parseClusterQuestion(question) }, question, session);
+  if (intent === "travel") return normalizePlan({ intent, city, ...parseTravelQuestion(question, session.context) }, question, session);
   return normalizePlan({ intent: "search", city, ...parseSearchQuestion(question, session.context) }, question, session);
 }
 
@@ -475,15 +504,7 @@ function normalizePlan(rawPlan, question, session = {}) {
   const context = session.context || {};
   const contextualNearby = shouldUseContextualNearby(question, context, rawPlan);
   const inferredIntent = inferIntent(question, context);
-  const intent = contextualNearby
-    ? "nearby"
-    : inferredIntent === "cluster"
-      ? "cluster"
-      : inferredIntent === "nearby"
-        ? "nearby"
-        : ["cluster", "nearby", "route", "search"].includes(rawPlan.intent)
-          ? rawPlan.intent
-          : inferredIntent;
+  const intent = resolveIntent({ rawIntent: rawPlan.intent, inferredIntent, contextualNearby });
   const city = shouldPreferContextCity(question, context) ? (context.lastCity || inferCity(question, context)) : (rawPlan.city || inferCity(question, context));
   const plan = { intent, city };
 
@@ -498,7 +519,7 @@ function normalizePlan(rawPlan, question, session = {}) {
   if (intent === "nearby") {
     const parsed = parseNearbyQuestion(question, context);
     plan.address = cleanupPlace(contextualNearby ? (parsed.address || context.lastAddress) : (rawPlan.address || parsed.address || context.lastAddress));
-    plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || "餐饮");
+    plan.keywords = normalizeNearbyKeywords(rawPlan.keywords, parsed.keywords);
     plan.radius = clampRadius(hasRadiusConstraint(question) ? parsed.radius : rawPlan.radius || parsed.radius, 200, 10000, 2000);
     plan.limit = parseRecommendationLimit(question);
     return plan;
@@ -523,11 +544,27 @@ function normalizePlan(rawPlan, question, session = {}) {
     return plan;
   }
 
+  if (intent === "travel") {
+    const parsed = parseTravelQuestion(question, context);
+    plan.theme = cleanupPlace(rawPlan.theme || rawPlan.keywords || parsed.theme || "轻松旅行");
+    plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || parsed.theme || "景点");
+    plan.keywordGroups = Array.isArray(rawPlan.keywordGroups) ? rawPlan.keywordGroups : parsed.keywordGroups;
+    plan.limit = parseRecommendationLimit(question) || 8;
+    return plan;
+  }
+
   const parsed = parseSearchQuestion(question, context);
   plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || question);
   plan.countMode = Boolean(rawPlan.countMode || parsed.countMode);
   plan.limit = parseRecommendationLimit(question);
   return plan;
+}
+
+function resolveIntent({ rawIntent, inferredIntent, contextualNearby }) {
+  if (contextualNearby) return "nearby";
+  if (["cluster", "nearby", "travel"].includes(inferredIntent)) return inferredIntent;
+  if (["cluster", "nearby", "route", "travel", "search"].includes(rawIntent)) return rawIntent;
+  return inferredIntent;
 }
 
 function safeParse(fn, fallback) {
@@ -670,9 +707,16 @@ function inferIntent(question, context = {}) {
   if (shouldUseContextualNearby(question, context)) return "nearby";
   if (/(?:从|由).+(?:到|去).+(多远|多久|路线|怎么走|要多久)|.+到.+(?:多远|多久|步行多久|路线|怎么走|要多久)/.test(question)) return "route";
   if (/(附近|周边|旁边|周围|步行\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内|走路\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内)/i.test(question)) return "nearby";
+  if (isTravelIntent(question)) return "travel";
   if (/(多远|多久|路线|怎么走|到.+要多久)/.test(question)) return "route";
   if (/(同时|都有|又有|兼具|共同|一起有|都拥有)/.test(question)) return "cluster";
   return "search";
+}
+
+function isTravelIntent(question) {
+  const text = String(question || "");
+  if (/(从|由).+(到|去).+(怎么走|路线|多久|多远|方便)/.test(text)) return false;
+  return /(玩一天|一日游|一天行程|旅行|旅游|行程|去哪|去哪里|哪里玩|下雨|雨天|室内景点|不太累|轻松|散步|Citywalk|citywalk|朋友聚餐|情侣|约会|遛弯|逛逛)/i.test(text);
 }
 
 function shouldUseContextualNearby(question, context = {}, rawPlan = {}) {
@@ -760,6 +804,36 @@ function hasRadiusConstraint(question) {
   return /(\d+(?:\.\d+)?)\s*(公里|千米|km|米|m|分钟|min|mins?)/i.test(String(question || ""));
 }
 
+function parseTravelQuestion(question, context = {}) {
+  const text = String(question || "");
+  const theme = inferTravelTheme(text);
+  const keywordGroups = inferTravelKeywordGroups(text);
+  return {
+    theme,
+    keywords: keywordGroups[0] || theme,
+    keywordGroups,
+    address: context.lastAddress || ""
+  };
+}
+
+function inferTravelTheme(question) {
+  if (/下雨|雨天|室内/.test(question)) return "雨天室内去处";
+  if (/朋友聚餐|聚餐|人均|餐厅|吃饭/.test(question)) return "朋友聚餐餐厅";
+  if (/散步|遛弯|情侣|约会|citywalk|Citywalk/i.test(question)) return "轻松散步去处";
+  if (/不太累|轻松/.test(question)) return "轻松一日游";
+  if (/玩一天|一日游|一天行程|旅行|旅游|行程/.test(question)) return "一日游候选";
+  return "旅行候选";
+}
+
+function inferTravelKeywordGroups(question) {
+  if (/下雨|雨天|室内/.test(question)) return ["博物馆", "美术馆", "购物中心", "室内景点"];
+  if (/朋友聚餐|聚餐|人均|餐厅|吃饭/.test(question)) return ["餐厅", "商场餐饮", "中餐厅", "美食"];
+  if (/散步|遛弯|情侣|约会|citywalk|Citywalk/i.test(question)) return ["公园", "步行街", "湖", "历史街区"];
+  if (/不太累|轻松/.test(question)) return ["景点", "公园", "博物馆", "咖啡"];
+  if (/玩一天|一日游|一天行程|旅行|旅游|行程/.test(question)) return ["景点", "公园", "博物馆", "步行街"];
+  return ["景点", "公园", "博物馆"];
+}
+
 function parseClusterQuestion(question) {
   const radiusMatch = question.match(/(\d+(?:\.\d+)?)\s*(公里|千米|km|米|m)/i);
   const radius = radiusMatch
@@ -807,6 +881,15 @@ function inferNearbyKeyword(text) {
   if (/公园|散步/.test(text)) return "公园";
   if (/酒店|住宿/.test(text)) return "酒店";
   return cleanupPlace(text.replace(/有什么|有哪些|推荐|可以|的/g, " ")) || "餐饮";
+}
+
+function normalizeNearbyKeywords(rawKeywords, parsedKeywords) {
+  const raw = cleanupPlace(rawKeywords || "");
+  const parsed = cleanupPlace(parsedKeywords || "");
+  if (!raw) return parsed || "餐饮";
+  if (/(情侣|约会|散步|遛弯|夜晚|晚上|夜景)/.test(raw) && parsed) return parsed;
+  if (/(朋友聚餐|聚餐|人均|吃饭)/.test(raw) && parsed) return parsed;
+  return raw || parsed || "餐饮";
 }
 
 function cleanupPlace(value) {
@@ -1027,6 +1110,30 @@ function buildRouteAnalysis({ origin, destination, kilometers, minutes }) {
     `推荐理由：这条结果直接来自高德步行路径规划，所以更适合拿来做真实出行判断，不是模型凭空估时间。`,
     `适合谁：如果你现在在做线下踩点、安排行程，或者想判断两个点位能不能顺路，这个结果已经够用。`,
     `怎么选：如果 ${minutes} 分钟你能接受，就可以按步行来安排；如果你想更快，我下一步可以继续给你对比打车、公交或者骑行。`
+  ].join("\n\n");
+}
+
+function buildRouteFallbackAnalysis({ plan }) {
+  return [
+    "我暂时没法把这条路线稳定算出来。",
+    `我当前识别到的起点是「${plan.from || "未识别"}」，终点是「${plan.to || "未识别"}」。如果其中一个地点不够具体，高德路线会比较容易失败。`,
+    "你可以换成更具体的起点和终点，比如加上城市、商圈、地铁站或景点全名，我再帮你重新算。"
+  ].join("\n\n");
+}
+
+function buildTravelAnalysis({ city, theme, pois, top }) {
+  if (!top.length) {
+    return [
+      `我按「${theme}」在${city}查了一轮高德真实地点，但这次候选不够稳定。`,
+      "这种问题更适合先拿真实地点候选，再按距离、天气、体力和同行人偏好排成路线；如果第一轮地点太少，我不会硬编完整行程。",
+      "你可以补充一个区域，比如西湖边、武林广场、滨江，或者告诉我更偏室内、拍照、吃饭还是散步。"
+    ].join("\n\n");
+  }
+
+  return [
+    `我先按「${theme}」在${city}给你找了 ${pois.length} 个高德真实地点候选，当前先展示前 ${top.length} 个。`,
+    `推荐理由：这一步先保证地点是真的存在，再做轻松程度、天气、聚餐或散步偏好的二次排序；排在前面的候选包括 ${top.slice(0, 3).map((poi) => `「${poi.name}」`).join("、")}。`,
+    "怎么选：你可以先从前几个里挑感兴趣的，我再帮你把它们串成不太累的一天动线，或者按室内/预算/步行少继续收窄。"
   ].join("\n\n");
 }
 
@@ -1368,6 +1475,7 @@ function buildNextContext({ question, plan, origin, destination }) {
     lastTo: plan?.to || destination?.formattedAddress || "",
     lastKeywords: plan?.keywords || "",
     lastRadius: plan?.radius || "",
+    lastLocation: origin?.location || destination?.location || "",
     lastResolvedOrigin: origin?.formattedAddress || "",
     lastUpdatedAt: new Date().toISOString()
   };
@@ -1621,6 +1729,86 @@ async function searchAroundWithFallback({ location, keywords, radius = 2000, pag
     if (dedupePois(groups.flat()).length >= 10) break;
   }
   return dedupePois(groups.flat());
+}
+
+async function findTravelCandidates(plan, question) {
+  const keywords = Array.isArray(plan.keywordGroups) && plan.keywordGroups.length ? plan.keywordGroups : [plan.keywords || plan.theme || "景点"];
+  const groups = [];
+  for (const keyword of keywords.slice(0, 5)) {
+    const results = await searchText({ keywords: keyword, city: plan.city, pageSize: 20, pages: 1 });
+    groups.push(results);
+  }
+  return rankPoisForRecommendation(tagRankingsForPois(dedupePois(groups.flat())), {
+    keywords: [plan.theme, plan.keywords, ...keywords].filter(Boolean).join(" "),
+    question
+  })
+    .map((poi) => ({
+      ...poi,
+      travelScore: scoreTravelPoi(poi, plan, question)
+    }))
+    .sort((left, right) => {
+      if (right.travelScore !== left.travelScore) return right.travelScore - left.travelScore;
+      return (right.recommendationScore || 0) - (left.recommendationScore || 0);
+    })
+    .slice(0, 80);
+}
+
+function scoreTravelPoi(poi, plan, question) {
+  const text = [poi.name, poi.type, poi.address, plan.theme, plan.keywords, question].filter(Boolean).join(" ");
+  let score = poi.recommendationScore || 0;
+
+  if (/下雨|雨天|室内/.test(text)) {
+    if (/博物馆|美术馆|科技馆|展览馆|购物中心|商场|文化馆/.test(text)) score += 70;
+    if (/公园|广场|步行街|风景名胜/.test(String(poi.type || ""))) score -= 20;
+  }
+
+  if (/朋友聚餐|聚餐|人均|餐厅|吃饭/.test(text)) {
+    if (/餐饮服务|中餐厅|西餐厅|餐厅|美食/.test(String(poi.type || ""))) score += 70;
+  }
+
+  if (/散步|遛弯|情侣|约会|citywalk|Citywalk/i.test(text)) {
+    if (/公园|风景名胜|步行街|广场|历史|街区|湖/.test(text)) score += 65;
+    if (/餐饮服务|购物服务/.test(String(poi.type || ""))) score -= 20;
+  }
+
+  if (/玩一天|一日游|一天行程|旅行|旅游|行程|不太累|轻松/.test(text)) {
+    if (/风景名胜|旅游景点|公园|博物馆|美术馆|步行街|文化/.test(text)) score += 65;
+    if (/咖啡|饮品|餐饮服务/.test(String(poi.type || ""))) score -= 35;
+  }
+
+  if (poi.address) score += 5;
+  return score;
+}
+
+async function routeFallbackResponse({ question, plan, error }, session = {}, options = {}) {
+  const result = {
+    intent: "route",
+    planner: plan.planner,
+    question,
+    city: plan.city,
+    analysis: buildRouteFallbackAnalysis({ plan, error }),
+    answer: "我暂时没法把这个路线稳定算出来，你可以换成更具体的起点和终点再试一次。",
+    map: {
+      mode: "route",
+      center: defaultCityCenter(plan.city),
+      markers: []
+    },
+    data: {
+      plan,
+      routeError: productErrorMessage(error)
+    },
+    source: "路线识别兜底",
+    context: buildNextContext({ question, plan })
+  };
+  return maybeFinalizeAgentResponse(result, session, options);
+}
+
+function productErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/起点|终点|识别/.test(raw)) return "我还没稳稳识别出起点和终点。";
+  if (/超时|timeout|fetch failed|网络|HTTP 5|502|503|504/i.test(raw)) return "路线服务暂时不太稳定。";
+  if (/没有找到|INVALID|失败|高德/i.test(raw)) return "我暂时没法把这个路线稳定算出来。";
+  return "这次查询没有稳定完成。";
 }
 
 function shouldFallbackNearbyKeyword(keywords) {
@@ -2161,6 +2349,7 @@ function normalizeLooseText(value) {
 }
 
 function normalizePoi(poi) {
+  const bizExt = poi.biz_ext && typeof poi.biz_ext === "object" ? poi.biz_ext : {};
   return {
     id: textOrEmpty(poi.id),
     name: textOrEmpty(poi.name),
@@ -2170,7 +2359,9 @@ function normalizePoi(poi) {
     district: textOrEmpty(poi.adname),
     location: textOrEmpty(poi.location),
     tel: textOrEmpty(poi.tel),
-    distance: textOrEmpty(poi.distance)
+    distance: textOrEmpty(poi.distance),
+    rating: textOrEmpty(bizExt.rating),
+    cost: textOrEmpty(bizExt.cost)
   };
 }
 
