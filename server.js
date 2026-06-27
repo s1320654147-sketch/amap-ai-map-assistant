@@ -201,10 +201,12 @@ async function handleApi(req, url, res) {
     const from = requiredParam(url, "from");
     const to = requiredParam(url, "to");
     const city = url.searchParams.get("city") || "";
-    const origin = await geocode(from, city);
-    const destination = await geocode(to, city);
-    const route = await walkingRoute(origin.location, destination.location);
-    sendJson(res, 200, { ok: true, origin, destination, route });
+    const requestedMode = normalizeRouteMode(url.searchParams.get("mode") || "auto");
+    const origin = await resolvePlaceAnchor(from, city);
+    const destination = await resolvePlaceAnchor(to, city);
+    const mode = resolveRouteMode(requestedMode, origin.location, destination.location);
+    const route = await routeByMode(mode, origin, destination, city);
+    sendJson(res, 200, { ok: true, mode, origin, destination, route });
     return;
   }
 
@@ -260,16 +262,18 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     try {
       const origin = await resolvePlaceAnchor(plan.from, plan.city);
       const destination = await resolvePlaceAnchor(plan.to, plan.city);
-      const route = await walkingRoute(origin.location, destination.location);
+      const routeMode = resolveRouteMode(plan.routeMode, origin.location, destination.location);
+      const route = await routeByMode(routeMode, origin, destination, plan.city);
       const minutes = Math.round(route.durationSeconds / 60);
       const kilometers = (route.distanceMeters / 1000).toFixed(2);
+      const modeLabel = routeModeLabel(routeMode);
       return maybeFinalizeAgentResponse({
         intent: "route",
         planner: plan.planner,
         question,
         city: plan.city,
-        analysis: buildRouteAnalysis({ origin, destination, kilometers, minutes }),
-        answer: `${origin.formattedAddress} 到 ${destination.formattedAddress} 步行约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
+        analysis: buildRouteAnalysis({ origin, destination, kilometers, minutes, modeLabel }),
+        answer: `${origin.formattedAddress} 到 ${destination.formattedAddress}${modeLabel}约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
         map: {
           mode: "route",
           center: centerLocation([origin.location, destination.location]),
@@ -277,10 +281,15 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
             { label: "起", title: origin.formattedAddress, location: origin.location },
             { label: "终", title: destination.formattedAddress, location: destination.location }
           ],
-          route: { origin: origin.location, destination: destination.location }
+          route: {
+            mode: routeMode,
+            origin: origin.location,
+            destination: destination.location,
+            path: route.polyline
+          }
         },
-        data: { plan, origin, destination, route },
-        source: "DeepSeek/规则解析 + 高德地理编码 + 高德步行路径规划",
+        data: { plan: { ...plan, routeMode }, origin, destination, route },
+        source: `DeepSeek/规则解析 + 高德地理编码 + 高德${modeLabel}路径规划`,
         context: buildNextContext({ question, plan, origin, destination })
       }, session, options);
     } catch (error) {
@@ -289,20 +298,44 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
   }
 
   if (plan.intent === "nearby") {
-    const origin = await resolvePlaceAnchor(plan.address, plan.city);
-    const pois = await searchAroundWithFallback({
+    const origin = await resolveNearbyOrigin(plan, session.context || {});
+    const rawPois = await searchAroundForQuery({
       location: origin.location,
       keywords: plan.keywords,
       radius: plan.radius,
       pageSize: 25,
       pages: 2
     });
-    const taggedPois = rankPoisForRecommendation(tagRankingsForPois(pois), {
+    const exactPois = await filterPoisForQuery(plan.keywords, rawPois);
+    const taggedPois = rankPoisForRecommendation(tagRankingsForPois(exactPois), {
       keywords: plan.keywords,
       originLocation: origin.location,
       question
-    });
+    }).sort((left, right) => Number(left.distance || 999999) - Number(right.distance || 999999));
     const top = taggedPois.slice(0, plan.limit || 10);
+    const nearest = top[0] || null;
+    let nearestRoute = null;
+    let nearestRouteMode = null;
+    if (plan.routeToNearest && nearest?.location) {
+      nearestRouteMode = normalizeRouteMode(plan.routeMode) === "auto" ? "walking" : normalizeRouteMode(plan.routeMode);
+      try {
+        nearestRoute = await routeByMode(
+          nearestRouteMode,
+          origin,
+          {
+            formattedAddress: [nearest.district, nearest.address].filter(Boolean).join(" ") || nearest.name,
+            city: nearest.city || plan.city,
+            location: nearest.location
+          },
+          plan.city
+        );
+      } catch {
+        nearestRoute = null;
+      }
+    }
+    const routeSummary = nearestRoute
+      ? `；${routeModeLabel(nearestRouteMode)}约 ${(nearestRoute.distanceMeters / 1000).toFixed(2)} 公里，预计 ${Math.round(nearestRoute.durationSeconds / 60)} 分钟`
+      : "";
     return maybeFinalizeAgentResponse({
       intent: "nearby",
       planner: plan.planner,
@@ -315,7 +348,9 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
         pois: taggedPois,
         top
       }),
-      answer: `我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内找到了 ${taggedPois.length} 个「${plan.keywords}」相关地点，优先展示前 ${top.length} 个。`,
+      answer: nearest
+        ? `距离 ${origin.formattedAddress} 最近的「${plan.keywords}」是 ${nearest.name}，直线距离约 ${nearest.distance || Math.round(distanceMeters(origin.location, nearest.location))} 米${routeSummary}。`
+        : `我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内没有找到名称明确匹配「${plan.keywords}」的地点。`,
       map: {
         mode: "pois",
         center: origin.location,
@@ -324,10 +359,28 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
           { label: "中", title: origin.formattedAddress, location: origin.location, role: "origin" },
           ...top.map((poi, index) => poiToMarker(poi, String(index + 1)))
         ],
-        legends: rankingLegendSummary(top)
+        legends: rankingLegendSummary(top),
+        route: nearestRoute
+          ? {
+              mode: nearestRouteMode,
+              origin: origin.location,
+              destination: nearest.location,
+              path: nearestRoute.polyline
+            }
+          : null
       },
-      data: { plan, origin, radius: plan.radius, pois: top, allPois: taggedPois.slice(0, 80) },
-      source: "DeepSeek/规则解析 + 高德地理编码 + 高德周边搜索",
+      data: {
+        plan: { ...plan, routeMode: nearestRouteMode || plan.routeMode },
+        origin,
+        radius: plan.radius,
+        pois: top,
+        allPois: taggedPois.slice(0, 80),
+        route: nearestRoute,
+        nearestPoi: nearest
+      },
+      source: nearestRoute
+        ? `DeepSeek/规则解析 + 高德周边搜索 + 高德${routeModeLabel(nearestRouteMode)}路径规划`
+        : "DeepSeek/规则解析 + 高德周边搜索",
       context: buildNextContext({ question, plan, origin })
     }, session, options);
   }
@@ -431,7 +484,13 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
       markers: top.map((poi, index) => poiToMarker(poi, String(index + 1))),
       legends: rankingLegendSummary(top)
     },
-    data: { plan, totalCount: searchResult.estimatedCount, countExhaustive: searchResult.countExhaustive, pois: top, allPois: taggedPois.slice(0, 80) },
+    data: {
+      plan,
+      totalCount: searchResult.estimatedCount,
+      countExhaustive: searchResult.countExhaustive,
+      pois: top,
+      allPois: plan.countMode ? taggedPois : taggedPois.slice(0, 80)
+    },
     source: "DeepSeek/规则解析 + 高德关键字搜索",
     context: buildNextContext({ question, plan })
   }, session, options);
@@ -470,7 +529,7 @@ async function planQuestionWithDeepSeek(question, session = {}) {
         {
           role: "system",
           content:
-            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|travel|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"theme\":\"旅行或场景主题\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边；route 只用于明确起点到终点的多远/多久/路线；travel 用于旅行规划、一天行程、下雨去哪里、不太累、适合散步、朋友聚餐等场景化去哪儿问题，travel 只返回真实地点候选，不要假装完整路线；search 用于普通搜索。城市缺省用上海。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city 和 address。重要约束：当用户提到具体品牌名时，默认理解为该品牌的官方门店/官方品牌点，而不是商场名、广场名、配送站、云仓、员工餐厅、内部食堂、奥莱、mini 或地址描述。若用户说“山姆”“大疆”“蜜雪冰城”“喜茶”等品牌，优先按官方品牌门店理解。"
+            "你是地图查询意图解析器，只输出 JSON。不要回答用户事实问题。真实地点数据必须由高德 API 查询。JSON schema: {\"intent\":\"cluster|nearby|route|travel|search\",\"city\":\"城市名\",\"radius\":数字米数,\"from\":\"起点\",\"to\":\"终点\",\"address\":\"中心地点\",\"keywords\":\"搜索关键词\",\"theme\":\"旅行或场景主题\",\"routeMode\":\"driving|transit|riding|walking|auto\",\"conditions\":[{\"label\":\"条件名\",\"aliases\":[\"别名\"]}]}。cluster 用于同时/都有/又有/兼具多个地点或业态；nearby 用于附近/周边和距离当前定位最近的品牌点；route 只用于明确起点到终点的多远/多久/路线；travel 用于旅行规划、一天行程、下雨去哪里、不太累、适合散步、朋友聚餐等场景化去哪儿问题，travel 只返回真实地点候选，不要假装完整路线；search 用于普通搜索。routeMode 必须严格按用户交通方式输出：开车/驾车/驾驶/打车/堵不堵=driving，公交/地铁/坐车/轻轨/公共交通=transit，骑车/自行车/共享单车/电瓶车/电动车=riding，走路/步行/走过去/溜达=walking，未说明=auto。城市缺省用上海。如果用户同时说上级市和县级市，例如“金华市义乌市”，city 必须取更具体的“义乌市”。半径缺省 cluster=800, nearby=2000。如果用户当前问题依赖上文，比如“那附近”“那里”“再找点别的”，要结合 conversation_context 继承上一次的 city、address 和 GPS location。重要约束：当用户提到具体品牌名时，默认理解为该品牌的官方门店/官方品牌点，而不是名字相似的商户。全家/FamilyMart 只能匹配全家便利店品牌；星巴克/Starbucks 只能匹配星巴克品牌。"
         },
         {
           role: "system",
@@ -505,13 +564,18 @@ function normalizePlan(rawPlan, question, session = {}) {
   const contextualNearby = shouldUseContextualNearby(question, context, rawPlan);
   const inferredIntent = inferIntent(question, context);
   const intent = resolveIntent({ rawIntent: rawPlan.intent, inferredIntent, contextualNearby });
-  const city = shouldPreferContextCity(question, context) ? (context.lastCity || inferCity(question, context)) : (rawPlan.city || inferCity(question, context));
+  const explicitCity = inferExplicitCity(question);
+  const city = explicitCity ||
+    (shouldPreferContextCity(question, context)
+      ? (context.lastCity || inferCity(question, context))
+      : (rawPlan.city || inferCity(question, context)));
   const plan = { intent, city };
 
   if (intent === "route") {
     const parsed = safeParse(() => parseRouteQuestion(question, context), {});
     plan.from = cleanupPlace(rawPlan.from || parsed.from || context.lastFrom || "");
     plan.to = cleanupPlace(rawPlan.to || parsed.to || context.lastTo || "");
+    plan.routeMode = normalizeRouteMode(rawPlan.routeMode || parsed.routeMode || inferRouteMode(question));
     if (!plan.from || !plan.to) throw new Error("我没有识别出起点和终点。可以这样问：上海静安寺到人民广场步行多久？");
     return plan;
   }
@@ -519,9 +583,14 @@ function normalizePlan(rawPlan, question, session = {}) {
   if (intent === "nearby") {
     const parsed = parseNearbyQuestion(question, context);
     plan.address = cleanupPlace(contextualNearby ? (parsed.address || context.lastAddress) : (rawPlan.address || parsed.address || context.lastAddress));
-    plan.keywords = normalizeNearbyKeywords(rawPlan.keywords, parsed.keywords);
-    plan.radius = clampRadius(hasRadiusConstraint(question) ? parsed.radius : rawPlan.radius || parsed.radius, 200, 10000, 2000);
+    plan.keywords = normalizeKnownBrandKeyword(question, normalizeNearbyKeywords(rawPlan.keywords, parsed.keywords));
+    plan.radius = isNearestPlaceQuery(question)
+      ? clampRadius(rawPlan.radius || 50000, 2000, 50000, 50000)
+      : clampRadius(hasRadiusConstraint(question) ? parsed.radius : rawPlan.radius || parsed.radius, 200, 10000, 2000);
     plan.limit = parseRecommendationLimit(question);
+    plan.useCurrentLocation = referencesCurrentLocation(question);
+    plan.routeToNearest = wantsRouteToNearest(question);
+    plan.routeMode = normalizeRouteMode(rawPlan.routeMode || inferRouteMode(question));
     return plan;
   }
 
@@ -554,7 +623,7 @@ function normalizePlan(rawPlan, question, session = {}) {
   }
 
   const parsed = parseSearchQuestion(question, context);
-  plan.keywords = cleanupPlace(rawPlan.keywords || parsed.keywords || question);
+  plan.keywords = normalizeKnownBrandKeyword(question, cleanupPlace(rawPlan.keywords || parsed.keywords || question));
   plan.countMode = Boolean(rawPlan.countMode || parsed.countMode);
   plan.limit = parseRecommendationLimit(question);
   return plan;
@@ -705,12 +774,39 @@ async function answerWithAmap(question) {
 
 function inferIntent(question, context = {}) {
   if (shouldUseContextualNearby(question, context)) return "nearby";
+  if (isNearestPlaceQuery(question)) return "nearby";
   if (/(?:从|由).+(?:到|去).+(多远|多久|路线|怎么走|要多久)|.+到.+(?:多远|多久|步行多久|路线|怎么走|要多久)/.test(question)) return "route";
   if (/(附近|周边|旁边|周围|步行\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内|走路\s*\d+(?:\.\d+)?\s*(?:分钟|min|mins?)\s*内)/i.test(question)) return "nearby";
   if (isTravelIntent(question)) return "travel";
   if (/(多远|多久|路线|怎么走|到.+要多久)/.test(question)) return "route";
   if (/(同时|都有|又有|兼具|共同|一起有|都拥有)/.test(question)) return "cluster";
   return "search";
+}
+
+function isNearestPlaceQuery(question) {
+  return /(距离我|离我|当前定位|当前位置).*(最近|最近的)|最近.*(在哪里|哪家|哪个).*(怎么走|步行|路线)?/i.test(String(question || ""));
+}
+
+function inferRouteMode(question) {
+  const text = String(question || "");
+  if (/开车|驾车|驾驶|打车|堵不堵|路况|自驾/.test(text)) return "driving";
+  if (/公交|地铁|坐车|轻轨|公共交通|换乘/.test(text)) return "transit";
+  if (/骑车|自行车|共享单车|电瓶车|电动车|骑行/.test(text)) return "riding";
+  if (/走路|步行|走过去|溜达|步行过去/.test(text)) return "walking";
+  return "auto";
+}
+
+function normalizeRouteMode(value) {
+  const mode = String(value || "").toLowerCase();
+  return ["driving", "transit", "riding", "walking", "auto"].includes(mode) ? mode : "auto";
+}
+
+function referencesCurrentLocation(question) {
+  return /(当前定位|当前位置|距离我|离我|我附近|我这里)/.test(String(question || ""));
+}
+
+function wantsRouteToNearest(question) {
+  return isNearestPlaceQuery(question) && /(怎么走|路线|步行|走过去|开车|驾车|骑车|公交|地铁)/.test(String(question || ""));
 }
 
 function isTravelIntent(question) {
@@ -736,7 +832,18 @@ function containsExplicitCity(question) {
 }
 
 function inferCity(question, context = {}) {
+  return inferExplicitCity(question) || context.lastCity || "上海";
+}
+
+function inferExplicitCity(question) {
   const knownCities = [
+    "义乌",
+    "东阳",
+    "永康",
+    "兰溪",
+    "武义",
+    "浦江",
+    "磐安",
     "上海",
     "北京",
     "广州",
@@ -748,7 +855,6 @@ function inferCity(question, context = {}) {
     "重庆",
     "武汉",
     "西安",
-    "义乌",
     "金华",
     "泉州",
     "厦门",
@@ -756,7 +862,7 @@ function inferCity(question, context = {}) {
     "宁波",
     "温州"
   ];
-  return knownCities.find((city) => question.includes(city)) || context.lastCity || "上海";
+  return knownCities.find((city) => String(question || "").includes(city)) || "";
 }
 
 function parseRouteQuestion(question, context = {}) {
@@ -773,7 +879,8 @@ function parseRouteQuestion(question, context = {}) {
   }
   return {
     from: cleanupPlace(match[1]),
-    to: cleanupPlace(match[2])
+    to: cleanupPlace(match[2]),
+    routeMode: inferRouteMode(question)
   };
 }
 
@@ -890,6 +997,16 @@ function normalizeNearbyKeywords(rawKeywords, parsedKeywords) {
   if (/(情侣|约会|散步|遛弯|夜晚|晚上|夜景)/.test(raw) && parsed) return parsed;
   if (/(朋友聚餐|聚餐|人均|吃饭)/.test(raw) && parsed) return parsed;
   return raw || parsed || "餐饮";
+}
+
+function normalizeKnownBrandKeyword(question, fallback) {
+  const text = `${question || ""} ${fallback || ""}`;
+  if (/全家|family\s*mart|familymart/i.test(text)) return "全家便利店";
+  if (/星巴克|starbucks/i.test(text)) return "星巴克";
+  if (/盒马|hema/i.test(text)) return "盒马";
+  if (/奥乐齐|奥乐奇|aldi/i.test(text)) return "奥乐齐";
+  if (/山姆|sam'?s\s*club/i.test(text)) return "山姆会员商店";
+  return cleanupPlace(fallback || "");
 }
 
 function cleanupPlace(value) {
@@ -1021,7 +1138,16 @@ function conditionMatchesPoi(condition, poi) {
     return /奥乐齐|aldi/i.test(rawName);
   }
 
-  if (isLikelyOfficialBrandQuery(condition)) {
+  if (/全家|family\s*mart|familymart/.test(conditionText)) {
+    return /全家(?:便利店)?|family\s*mart|familymart/i.test(rawName) &&
+      !/物全家美|全家福|全家宴|全家装|全家桶/i.test(rawName);
+  }
+
+  if (/星巴克|starbucks/.test(conditionText)) {
+    return /星巴克|starbucks/i.test(rawName);
+  }
+
+  if (isExactBrandCondition(condition)) {
     return condition.aliases.some((alias) => {
       const normalizedAlias = normalizeLooseText(alias);
       return normalizedAlias && normalizedName.includes(normalizedAlias);
@@ -1040,6 +1166,12 @@ function isLikelyOfficialBrandQuery(condition) {
     return false;
   }
   return condition.aliases.some((alias) => normalizeLooseText(alias).length >= 2);
+}
+
+function isExactBrandCondition(condition) {
+  const text = condition.aliases.join(" ");
+  return /全家|family\s*mart|familymart|星巴克|starbucks|盒马|hema|奥乐齐|奥乐奇|aldi|山姆|sam'?s\s*club/i.test(text) ||
+    isLikelyOfficialBrandQuery(condition);
 }
 
 function isSuppressedBrandVariant(queryTerms, poi) {
@@ -1097,6 +1229,14 @@ function expandConditionAliases(values) {
     ["山姆", "山姆会员店", "山姆会员商店", "Sam's Club", "Sams Club"].forEach((item) => expanded.add(item));
   }
 
+  if (/全家|family\s*mart|familymart/.test(text)) {
+    ["全家", "全家便利店", "FamilyMart", "Family Mart"].forEach((item) => expanded.add(item));
+  }
+
+  if (/星巴克|starbucks/.test(text)) {
+    ["星巴克", "Starbucks"].forEach((item) => expanded.add(item));
+  }
+
   return [...expanded];
 }
 
@@ -1104,12 +1244,12 @@ function estimateClusterCalls(conditions) {
   return conditions.reduce((sum, condition) => sum + condition.aliases.length * 4, 0);
 }
 
-function buildRouteAnalysis({ origin, destination, kilometers, minutes }) {
+function buildRouteAnalysis({ origin, destination, kilometers, minutes, modeLabel = "步行" }) {
   return [
-    `先给你一个直接结论：从 ${origin.formattedAddress} 到 ${destination.formattedAddress}，步行大约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
-    `推荐理由：这条结果直接来自高德步行路径规划，所以更适合拿来做真实出行判断，不是模型凭空估时间。`,
+    `先给你一个直接结论：从 ${origin.formattedAddress} 到 ${destination.formattedAddress}，${modeLabel}大约 ${kilometers} 公里，预计 ${minutes} 分钟。`,
+    `推荐理由：这条结果直接来自高德${modeLabel}路径规划，所以更适合拿来做真实出行判断，不是模型凭空估时间。`,
     `适合谁：如果你现在在做线下踩点、安排行程，或者想判断两个点位能不能顺路，这个结果已经够用。`,
-    `怎么选：如果 ${minutes} 分钟你能接受，就可以按步行来安排；如果你想更快，我下一步可以继续给你对比打车、公交或者骑行。`
+    `怎么选：如果 ${minutes} 分钟你能接受，就可以按${modeLabel}来安排；也可以继续让我对比其他交通方式。`
   ].join("\n\n");
 }
 
@@ -1445,10 +1585,13 @@ async function searchTextWithMeta({ keywords, city = "", pageSize = 20, pages = 
     payloads.push(...(await Promise.all(requests)));
   }
 
-  let pois = dedupePois(payloads.flatMap((payload) => payload.pois || []));
+  let pois = filterPoisToAdministrativeArea(
+    dedupePois(payloads.flatMap((payload) => payload.pois || [])),
+    city
+  );
 
   const condition = parseCondition(keywords);
-  if (isLikelyOfficialBrandQuery(condition)) {
+  if (isExactBrandCondition(condition)) {
     pois = dedupePois(
       (await safeRefineConditionPoisWithDeepSeek(
         condition,
@@ -1463,6 +1606,16 @@ async function searchTextWithMeta({ keywords, city = "", pageSize = 20, pages = 
     countExhaustive: !countMode || availablePages <= SEARCH_COUNT_MAX_PAGES,
     estimatedCount: countMode ? pois.length : pois.length
   };
+}
+
+function filterPoisToAdministrativeArea(pois, city) {
+  const target = normalizeLooseText(city);
+  if (!target) return pois;
+  return (pois || []).filter((poi) => {
+    const areaText = normalizeLooseText([poi.city, poi.district].filter(Boolean).join(" "));
+    if (!areaText) return true;
+    return areaText.includes(target) || target.includes(areaText);
+  });
 }
 
 function buildNextContext({ question, plan, origin, destination }) {
@@ -1731,6 +1884,50 @@ async function searchAroundWithFallback({ location, keywords, radius = 2000, pag
   return dedupePois(groups.flat());
 }
 
+async function searchAroundForQuery({ location, keywords, radius = 2000, pageSize = 20, pages = 1 }) {
+  const condition = parseCondition(keywords);
+  if (!isExactBrandCondition(condition)) {
+    return searchAroundWithFallback({ location, keywords, radius, pageSize, pages });
+  }
+  const groups = await Promise.all(
+    condition.aliases.slice(0, 4).map((keyword) =>
+      searchAround({ location, keywords: keyword, radius, pageSize, pages: 1 })
+    )
+  );
+  return dedupePois(groups.flat());
+}
+
+async function resolveNearbyOrigin(plan, context = {}) {
+  if (plan.useCurrentLocation && isLocationString(context.lastLocation || "")) {
+    return {
+      formattedAddress: context.lastResolvedOrigin || context.lastAddress || "当前定位",
+      province: "",
+      city: context.lastCity || plan.city,
+      district: context.lastDistrict || "",
+      location: context.lastLocation,
+      level: "location",
+      name: context.lastAddress || "当前定位"
+    };
+  }
+  return resolvePlaceAnchor(plan.address, plan.city);
+}
+
+function isLocationString(value) {
+  return /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(String(value || ""));
+}
+
+async function filterPoisForQuery(keywords, pois) {
+  const condition = parseCondition(keywords);
+  if (!isExactBrandCondition(condition)) return dedupePois(pois);
+  return dedupePois(
+    (pois || []).filter(
+      (poi) => hasLocation(poi) &&
+        !isSuppressedPoiForQuery(condition.aliases, poi) &&
+        conditionMatchesPoi(condition, poi)
+    )
+  );
+}
+
 async function findTravelCandidates(plan, question) {
   const keywords = Array.isArray(plan.keywordGroups) && plan.keywordGroups.length ? plan.keywordGroups : [plan.keywords || plan.theme || "景点"];
   const groups = [];
@@ -1946,10 +2143,35 @@ async function geocode(address, city = "") {
   return normalizeGeocode(geocodeResult);
 }
 
+function resolveRouteMode(requestedMode, origin, destination) {
+  const mode = normalizeRouteMode(requestedMode);
+  if (mode !== "auto") return mode;
+  return distanceMeters(origin, destination) <= 3000 ? "walking" : "driving";
+}
+
+function routeModeLabel(mode) {
+  return {
+    driving: "驾车",
+    transit: "公交",
+    riding: "骑行",
+    walking: "步行"
+  }[mode] || "出行";
+}
+
+async function routeByMode(mode, origin, destination, city = "") {
+  if (mode === "driving") return drivingRoute(origin.location, destination.location);
+  if (mode === "transit") {
+    return transitRoute(origin.location, destination.location, origin.city || city, destination.city || city);
+  }
+  if (mode === "riding") return ridingRoute(origin.location, destination.location);
+  return walkingRoute(origin.location, destination.location);
+}
+
 async function walkingRoute(origin, destination) {
   const payload = await amapGet("/v3/direction/walking", {
     origin,
-    destination
+    destination,
+    extensions: "all"
   });
   const path = payload.route?.paths?.[0];
   if (!path) {
@@ -1959,13 +2181,104 @@ async function walkingRoute(origin, destination) {
   return {
     distanceMeters: Number(path.distance || 0),
     durationSeconds: Number(path.duration || 0),
+    polyline: collectStepPolyline(path.steps),
     steps: (path.steps || []).map((step) => ({
       instruction: step.instruction,
       road: step.road,
       distanceMeters: Number(step.distance || 0),
-      durationSeconds: Number(step.duration || 0)
+      durationSeconds: Number(step.duration || 0),
+      polyline: splitPolyline(step.polyline)
     }))
   };
+}
+
+async function drivingRoute(origin, destination) {
+  const payload = await amapGet("/v3/direction/driving", {
+    origin,
+    destination,
+    strategy: "0",
+    extensions: "all"
+  });
+  const path = payload.route?.paths?.[0];
+  if (!path) throw new Error("没有找到驾车路线");
+  return {
+    distanceMeters: Number(path.distance || 0),
+    durationSeconds: Number(path.duration || 0),
+    trafficLights: Number(path.traffic_lights || 0),
+    tolls: Number(path.tolls || 0),
+    polyline: collectStepPolyline(path.steps),
+    steps: (path.steps || []).map((step) => ({
+      instruction: step.instruction,
+      road: step.road,
+      distanceMeters: Number(step.distance || 0),
+      durationSeconds: Number(step.duration || 0),
+      polyline: splitPolyline(step.polyline)
+    }))
+  };
+}
+
+async function transitRoute(origin, destination, city, destinationCity) {
+  const payload = await amapGet("/v3/direction/transit/integrated", {
+    origin,
+    destination,
+    city,
+    cityd: destinationCity || city,
+    strategy: "0",
+    nightflag: "0"
+  });
+  const transit = payload.route?.transits?.[0];
+  if (!transit) throw new Error("没有找到公交路线");
+  return {
+    distanceMeters: Number(transit.distance || 0),
+    durationSeconds: Number(transit.duration || 0),
+    cost: Number(transit.cost || 0),
+    walkingDistanceMeters: Number(transit.walking_distance || 0),
+    polyline: collectTransitPolyline(transit),
+    segments: transit.segments || []
+  };
+}
+
+async function ridingRoute(origin, destination) {
+  const payload = await amapGet("/v4/direction/bicycling", {
+    origin,
+    destination
+  });
+  const path = payload.data?.paths?.[0] || payload.route?.paths?.[0];
+  if (!path) throw new Error("没有找到骑行路线");
+  return {
+    distanceMeters: Number(path.distance || 0),
+    durationSeconds: Number(path.duration || 0),
+    polyline: collectStepPolyline(path.steps),
+    steps: (path.steps || []).map((step) => ({
+      instruction: step.instruction,
+      road: step.road,
+      distanceMeters: Number(step.distance || 0),
+      durationSeconds: Number(step.duration || 0),
+      polyline: splitPolyline(step.polyline)
+    }))
+  };
+}
+
+function collectStepPolyline(steps) {
+  return (steps || []).flatMap((step) => splitPolyline(step.polyline));
+}
+
+function collectTransitPolyline(transit) {
+  const points = [];
+  for (const segment of transit?.segments || []) {
+    for (const step of segment.walking?.steps || []) points.push(...splitPolyline(step.polyline));
+    for (const busline of segment.bus?.buslines || []) points.push(...splitPolyline(busline.polyline));
+    if (segment.railway?.departure_stop?.location) points.push(segment.railway.departure_stop.location);
+    if (segment.railway?.arrival_stop?.location) points.push(segment.railway.arrival_stop.location);
+  }
+  return points;
+}
+
+function splitPolyline(value) {
+  return String(value || "")
+    .split(";")
+    .map((point) => point.trim())
+    .filter(isLocationString);
 }
 
 async function amapGet(endpoint, params) {
@@ -1986,7 +2299,7 @@ async function amapGet(endpoint, params) {
     }
 
     const payload = await response.json();
-    if (payload.status === "1") {
+    if (payload.status === "1" || payload.errcode === 0 || payload.errcode === "0") {
       return payload;
     }
 

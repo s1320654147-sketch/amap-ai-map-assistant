@@ -55,7 +55,9 @@ const state = {
   rankings: {
     city: "上海",
     markers: [],
-    mode: "all"
+    mode: "all",
+    viewportCity: "",
+    viewportCenter: null
   },
   evidenceRows: [],
   evidenceInitialLimit: 6,
@@ -179,6 +181,22 @@ function renderToolbar() {
 
   citySelect.addEventListener("change", async () => {
     state.filters.city = citySelect.value;
+    const selectedCenter = cityCenter(citySelect.value);
+    state.location = {
+      city: citySelect.value,
+      district: "",
+      address: "",
+      formattedAddress: "",
+      location: selectedCenter,
+      source: "city-filter"
+    };
+    sessionStorage.setItem("amap.currentLocation", JSON.stringify(state.location));
+    const selectedRankingCity = rankingCityName(citySelect.value);
+    state.rankings.viewportCity = selectedRankingCity;
+    state.rankings.viewportCenter = selectedRankingCity ? selectedCenter : null;
+    if (map) {
+      map.setZoomAndCenter(selectedRankingCity ? 11 : 13, selectedCenter);
+    }
     syncFilterSelectState();
     renderContext();
     await refreshLocalResults();
@@ -291,9 +309,9 @@ function ensureCityOption(city) {
   syncFilterSelectState();
 }
 
-async function loadRankingLayer() {
+async function loadRankingLayer(cityOverride = "") {
   try {
-    const city = rankingCityName(state.location.city || state.filters.city);
+    const city = cityOverride || activeRankingCity();
     if (!city) return false;
     state.rankings.city = city;
     const payload = await apiGet(`/api/rankings/map?city=${encodeURIComponent(city)}`);
@@ -309,7 +327,7 @@ async function loadRankingLayer() {
 async function refreshLocalResults() {
   syncRankingToolbarVisibility();
   if (hasRankingDataForCurrentCity() && Array.isArray(state.location.location)) {
-    const loaded = state.rankings.markers.length && state.rankings.city === rankingCityName(state.location.city || state.filters.city)
+    const loaded = state.rankings.markers.length && state.rankings.city === activeRankingCity()
       ? (renderRankingLayer(), true)
       : await loadRankingLayer();
     if (loaded) return;
@@ -320,16 +338,14 @@ async function refreshLocalResults() {
 function renderRankingLayer() {
   if (!map) return;
   clearMap();
-  rankingOverlays.forEach((overlay) => overlay.setMap(null));
-  rankingOverlays = [];
 
-  const entries = localRankingEntries();
-  renderRankingEvidence(entries);
-  if (els.mapTitle) els.mapTitle.textContent = `${rankingCityName(state.location.city || state.filters.city)}周边榜单 · ${entries.length} 家`;
-  const bounds = [];
-  if (Array.isArray(state.location.location)) {
+  const mapEntries = filterRankingMarkers(state.rankings.markers);
+  const evidenceEntries = rankingEvidenceEntries();
+  renderRankingEvidence(evidenceEntries);
+  if (els.mapTitle) els.mapTitle.textContent = `上海三榜餐厅 · ${mapEntries.length} 家`;
+
+  if (!state.rankings.viewportCity && Array.isArray(state.location.location)) {
     const origin = state.location.location;
-    bounds.push(origin);
     const originMarker = new window.AMap.Marker({
       position: origin,
       title: state.location.formattedAddress || state.location.address || "当前位置",
@@ -354,10 +370,10 @@ function renderRankingLayer() {
     circle.setMap(map);
     rankingOverlays.push(circle);
   }
-  entries.forEach((entry) => {
+
+  mapEntries.forEach((entry) => {
     if (!entry.location) return;
     const point = parseLocation(entry.location);
-    bounds.push(point);
     const marker = new window.AMap.Marker({
       position: point,
       content: rankingMarkerContent(entry),
@@ -369,8 +385,8 @@ function renderRankingLayer() {
     marker.setMap(map);
     rankingOverlays.push(marker);
   });
-  state.mapBounds = bounds;
-  fitMap();
+
+  state.mapBounds = [];
   renderMapLegend();
 }
 
@@ -403,20 +419,31 @@ function filterRankingMarkers(markers) {
   return markers.filter((item) => Array.isArray(item.categories) && item.categories.includes(state.rankings.mode));
 }
 
-function localRankingEntries() {
-  if (!hasRankingDataForCurrentCity() || !Array.isArray(state.location.location)) return [];
-  const radius = walkMinutesToRadius(state.filters.walkMinutes);
-  return filterRankingMarkers(state.rankings.markers)
+function rankingEvidenceEntries() {
+  const anchor = rankingAnchorPoint();
+  if (!hasRankingDataForCurrentCity() || !anchor) return [];
+  const radius = state.rankings.viewportCity ? 8000 : Math.max(2000, walkMinutesToRadius(state.filters.walkMinutes));
+  const sorted = filterRankingMarkers(state.rankings.markers)
     .map((entry) => ({
       ...entry,
-      distanceMeters: entry.location ? Math.round(distanceBetweenPoints(state.location.location, parseLocation(entry.location))) : Number.POSITIVE_INFINITY
+      distanceMeters: entry.location ? Math.round(distanceBetweenPoints(anchor, parseLocation(entry.location))) : Number.POSITIVE_INFINITY
     }))
-    .filter((entry) => Number.isFinite(entry.distanceMeters) && entry.distanceMeters <= radius)
     .sort((left, right) => left.distanceMeters - right.distanceMeters);
+  const nearby = sorted.filter((entry) => Number.isFinite(entry.distanceMeters) && entry.distanceMeters <= radius);
+  return nearby.length ? nearby : sorted.slice(0, 20);
 }
 
 function hasRankingDataForCurrentCity() {
-  return Boolean(rankingCityName(state.location.city || state.filters.city));
+  return Boolean(activeRankingCity());
+}
+
+function activeRankingCity() {
+  return state.rankings.viewportCity || rankingCityName(state.filters.city);
+}
+
+function rankingAnchorPoint() {
+  if (Array.isArray(state.rankings.viewportCenter)) return state.rankings.viewportCenter;
+  return Array.isArray(state.location.location) ? state.location.location : null;
 }
 
 function rankingCityName(city) {
@@ -493,9 +520,58 @@ async function initMap() {
 
     bindManualMapPick();
     await initGeolocation();
+    bindViewportRankingDiscovery();
   } catch (error) {
     setMapFallback(error instanceof Error ? error.message : "地图初始化失败");
   }
+}
+
+function bindViewportRankingDiscovery() {
+  if (!map) return;
+  map.on("dragend", handleMapViewportChange);
+}
+
+async function handleMapViewportChange() {
+  if (!map) return;
+  const center = map.getCenter();
+  const point = [
+    center?.getLng ? center.getLng() : center?.lng,
+    center?.getLat ? center.getLat() : center?.lat
+  ].map(Number);
+  if (!point.every(Number.isFinite)) return;
+
+  if (isPointInShanghai(point)) {
+    const wasAlreadyBrowsingShanghai = state.rankings.viewportCity === "上海";
+    state.rankings.viewportCity = "上海";
+    state.rankings.viewportCenter = point;
+    syncRankingToolbarVisibility();
+    if (state.rankings.markers.length && state.rankings.city === "上海") {
+      if (wasAlreadyBrowsingShanghai) {
+        renderRankingEvidence(rankingEvidenceEntries());
+        if (els.mapTitle) els.mapTitle.textContent = `上海三榜餐厅 · ${filterRankingMarkers(state.rankings.markers).length} 家`;
+      } else {
+        renderRankingLayer();
+      }
+    } else {
+      await loadRankingLayer("上海");
+    }
+    return;
+  }
+
+  if (state.rankings.viewportCity) {
+    state.rankings.viewportCity = "";
+    state.rankings.viewportCenter = null;
+    clearRankingOverlays();
+    syncRankingToolbarVisibility();
+    document.querySelector(".map-legend")?.remove();
+    if (els.mapTitle) els.mapTitle.textContent = "当前地图视野";
+    setEvidenceNotice("当前地图视野暂无已录入榜单，可点击地图设置新的周边位置。");
+  }
+}
+
+function isPointInShanghai(point) {
+  const [lng, lat] = point.map(Number);
+  return lng >= 120.85 && lng <= 122.2 && lat >= 30.65 && lat <= 31.9;
 }
 
 function bindManualMapPick() {
@@ -610,6 +686,8 @@ async function commitLocationFromPoint(point, source) {
 }
 
 async function commitLocation({ point, city, district, address, formattedAddress, source }) {
+  state.rankings.viewportCity = "";
+  state.rankings.viewportCenter = null;
   state.location = {
     city: city || state.filters.city,
     district: district || "",
@@ -1226,14 +1304,23 @@ function renderAgentMap(payload) {
   }
 
   if (payload.map.route) {
+    const routeMode = payload.map.route.mode || payload.data?.plan?.routeMode || "walking";
+    const routePath = Array.isArray(payload.map.route.path) && payload.map.route.path.length
+      ? payload.map.route.path.map(parseLocation).filter((point) => point.length === 2 && point.every(Number.isFinite))
+      : [parseLocation(payload.map.route.origin), parseLocation(payload.map.route.destination)];
     const line = new window.AMap.Polyline({
-      path: [parseLocation(payload.map.route.origin), parseLocation(payload.map.route.destination)],
-      strokeColor: "#f59f2f",
-      strokeWeight: 4,
-      strokeStyle: "dashed"
+      path: routePath,
+      strokeColor: routeModeColor(routeMode),
+      strokeWeight: 6,
+      strokeOpacity: 0.88,
+      strokeStyle: "solid",
+      lineJoin: "round",
+      lineCap: "round",
+      showDir: true
     });
     line.setMap(map);
     overlays.push(line);
+    routePath.forEach((point) => bounds.push(point));
   }
 
   state.mapBounds = bounds;
@@ -1278,7 +1365,18 @@ function renderAgentEvidence(payload) {
 
   if (payload.intent === "route" && payload.data?.route) {
     const route = payload.data.route;
-    setEvidenceRows([evidenceRow(1, "步行路线", "高德步行路径规划", `${route.distanceMeters}m`, `${Math.round(route.durationSeconds / 60)}min`, "高德")], 1);
+    const routeMode = payload.data?.plan?.routeMode || payload.map?.route?.mode || "walking";
+    const routeLabel = routeModeText(routeMode);
+    setEvidenceRows([
+      evidenceRow(
+        1,
+        `${routeLabel}路线`,
+        `高德${routeLabel}路径规划`,
+        formatDistance(route.distanceMeters),
+        `${Math.round(route.durationSeconds / 60)}min`,
+        "高德"
+      )
+    ], 1);
     return;
   }
 
@@ -1347,6 +1445,7 @@ function setEvidenceNotice(message) {
   state.evidenceExpanded = false;
   if (els.evidence) els.evidence.innerHTML = `<p class="empty">${escapeHtml(message)}</p>`;
   updateMoreButton();
+  syncEvidenceScrollbarWidth();
 }
 
 function renderEvidenceRows() {
@@ -1354,6 +1453,16 @@ function renderEvidenceRows() {
   const visibleCount = state.evidenceExpanded ? state.evidenceRows.length : state.evidenceInitialLimit;
   els.evidence.innerHTML = state.evidenceRows.slice(0, visibleCount).join("");
   updateMoreButton();
+  syncEvidenceScrollbarWidth();
+}
+
+function syncEvidenceScrollbarWidth() {
+  const table = document.querySelector(".evidence-table");
+  if (!table || !els.evidence) return;
+  requestAnimationFrame(() => {
+    const scrollbarWidth = Math.max(0, els.evidence.offsetWidth - els.evidence.clientWidth);
+    table.style.setProperty("--evidence-scrollbar-width", `${scrollbarWidth}px`);
+  });
 }
 
 function toggleEvidenceRows() {
@@ -1418,6 +1527,10 @@ function renderEvidenceNotice(message) {
 function clearMap() {
   overlays.forEach((overlay) => overlay.setMap(null));
   overlays = [];
+  clearRankingOverlays();
+}
+
+function clearRankingOverlays() {
   rankingOverlays.forEach((overlay) => overlay.setMap(null));
   rankingOverlays = [];
 }
@@ -1523,6 +1636,24 @@ function intentLabel(intent) {
 
 function plannerText(planner) {
   return planner === "deepseek-v4-flash" ? "DeepSeek 解析" : "规则解析";
+}
+
+function routeModeText(mode) {
+  return {
+    driving: "驾车",
+    transit: "公交",
+    riding: "骑行",
+    walking: "步行"
+  }[mode] || "出行";
+}
+
+function routeModeColor(mode) {
+  return {
+    driving: "#2563eb",
+    transit: "#7c3aed",
+    riding: "#f59f2f",
+    walking: "#008f81"
+  }[mode] || "#008f81";
 }
 
 function markerClass(rankingCategory, role) {

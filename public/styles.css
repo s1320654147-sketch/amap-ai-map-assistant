@@ -669,8 +669,7 @@ body:not(.has-messages) .chat-input {
 
 body:not(.has-messages) .engine-powered-tag,
 body:not(.has-messages) .context-bar,
-body:not(.has-messages) .search-hint,
-body:not(.has-messages) .ranking-toolbar {
+body:not(.has-messages) .search-hint {
   display: none;
 }
 
@@ -1093,9 +1092,9 @@ body.mobile-page.has-messages .mobile-ask {
 
 .table-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
+  grid-template-columns: minmax(0, 1fr) 256px;
   align-items: center;
-  padding: 16px 18px 10px;
+  padding: 16px calc(22px + var(--evidence-scrollbar-width, 0px)) 10px 22px;
 }
 
 .table-header h2 {
@@ -1106,7 +1105,9 @@ body.mobile-page.has-messages .mobile-ask {
 
 .table-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, 80px);
+  gap: 8px;
+  justify-content: end;
   color: var(--muted);
   font-size: 11px;
   text-align: center;
@@ -1123,7 +1124,7 @@ body.mobile-page.has-messages .mobile-ask {
   transition: background-color 0.2s ease;
   cursor: pointer;
   display: grid;
-  grid-template-columns: 22px minmax(80px, 0.9fr) minmax(130px, 1.5fr) 58px 64px 58px;
+  grid-template-columns: 22px minmax(80px, 0.9fr) minmax(130px, 1.5fr) repeat(3, 80px);
   gap: 8px;
   align-items: center;
   min-height: 44px;
@@ -1157,6 +1158,13 @@ body.mobile-page.has-messages .mobile-ask {
   color: var(--muted);
   font-style: normal;
   font-weight: 500;
+}
+
+.evidence-row > b {
+  width: 80px;
+  min-width: 80px;
+  text-align: center;
+  justify-self: center;
 }
 
 .empty {
