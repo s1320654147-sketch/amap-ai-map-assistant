@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>高德 AI 地图助手 - Mobile</title>
-    <link rel="stylesheet" href="/styles.css?v=20260627-routing" />
+    <link rel="stylesheet" href="/styles.css?v=20260627-ux" />
   </head>
   <body class="mobile-page">
     <main class="mobile-shell">
@@ -35,6 +35,20 @@
         </div>
         <form id="agentForm" class="ask-form">
           <textarea id="questionInput" name="question" rows="2" placeholder="输入你的地点问题"></textarea>
+          <button class="inspire-fab" id="inspireButton" type="button" aria-label="获取提问灵感" title="获取提问灵感" data-target="questionInput">
+            <svg class="inspire-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 13.9 8.1 19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" />
+              <path d="M18 3 18.8 5.2 21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z" />
+            </svg>
+          </button>
+          <button class="voice-fab" id="voiceInputButton" type="button" aria-label="语音输入" title="语音输入" data-target="questionInput" hidden>
+            <svg class="voice-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+              <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+              <path d="M12 17v3" />
+              <path d="M9 20h6" />
+            </svg>
+          </button>
           <button class="send-fab" type="submit" aria-label="发送">➤</button>
         </form>
         <div class="quick-prompts" id="quickPrompts"></div>
@@ -75,10 +89,24 @@
 
       <footer class="chat-input" id="followupInputBar">
         <input id="inlineQuestion" type="text" placeholder="继续提问..." />
+        <button class="inspire-fab inspire-fab-inline" id="inlineInspireButton" type="button" aria-label="获取提问灵感" title="获取提问灵感" data-target="inlineQuestion">
+          <svg class="inspire-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 13.9 8.1 19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" />
+            <path d="M18 3 18.8 5.2 21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z" />
+          </svg>
+        </button>
+        <button class="voice-fab voice-fab-inline" id="inlineVoiceButton" type="button" aria-label="语音输入" title="语音输入" data-target="inlineQuestion" hidden>
+          <svg class="voice-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+            <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+            <path d="M12 17v3" />
+            <path d="M9 20h6" />
+          </svg>
+        </button>
         <button id="inlineSend" type="button">➤</button>
       </footer>
     </main>
 
-    <script src="/app.js?v=20260627-routing" type="module"></script>
+    <script src="/app.js?v=20260627-ux" type="module"></script>
   </body>
 </html>

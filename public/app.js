@@ -5,7 +5,13 @@ const els = {
   plannerBadge: $("#plannerBadge"),
   form: $("#agentForm"),
   questionInput: $("#questionInput"),
+  inspireButton: $("#inspireButton"),
+  voiceInputButton: $("#voiceInputButton"),
+  mobileVoiceButton: $("#mobileVoiceButton"),
   inlineInput: $("#inlineQuestion"),
+  inlineInspireButton: $("#inlineInspireButton"),
+  inlineVoiceButton: $("#inlineVoiceButton"),
+  mobileInlineVoiceButton: $("#mobileInlineVoiceButton"),
   inlineSend: $("#inlineSend"),
   conversation: $("#conversation"),
   evidence: $("#evidence"),
@@ -16,6 +22,8 @@ const els = {
   followupInputBar: $("#followupInputBar"),
   quickPrompts: $("#quickPrompts"),
   moreButton: $(".more-button"),
+  evidenceDrawer: $("#evidenceDrawer"),
+  evidenceDrawerToggle: $("#evidenceDrawerToggle"),
   contextResetButton: $("#contextResetButton"),
   contextResetBannerButton: $("#contextResetBannerButton"),
   searchHint: $("#searchHint"),
@@ -62,7 +70,21 @@ const state = {
   evidenceRows: [],
   evidenceInitialLimit: 6,
   evidenceExpanded: false,
-  isAsking: false
+  mobileDrawerExpanded: false,
+  isAsking: false,
+  voice: {
+    supported: false,
+    isListening: false,
+    targetKey: "questionInput",
+    pendingTargetKey: "",
+    baseText: "",
+    recognition: null,
+    mobileHoldActive: false,
+    mobileHoldCanceled: false,
+    mobileHoldStartY: 0,
+    cancelOnEnd: false,
+    suppressNextMobileClick: false
+  }
 };
 
 let map = null;
@@ -76,20 +98,16 @@ const suggestions = [
     question: () => `${currentAreaLabel()}附近有什么值得吃的？`
   },
   {
+    label: () => "AI推荐",
+    question: () => `按我当前定位，推荐${currentAreaLabel()}附近适合现在去的地方。`
+  },
+  {
     label: () => "步行5分钟",
     question: () => `帮我找${currentAreaLabel()}附近步行5分钟内的咖啡馆。`
   },
   {
     label: () => "电影院",
     question: () => `${currentAreaLabel()}附近有哪些电影院？`
-  },
-  {
-    label: () => "商场",
-    question: () => `${currentAreaLabel()}附近有哪些商场？`
-  },
-  {
-    label: () => "AI推荐",
-    question: () => `按我当前定位，推荐${currentAreaLabel()}附近适合现在去的地方。`
   }
 ];
 
@@ -106,6 +124,7 @@ async function init() {
   restoreLocation();
   renderToolbar();
   bindEvents();
+  initVoiceInput();
   renderSuggestions();
   renderContext();
   updateChatMode();
@@ -117,12 +136,23 @@ function bindEvents() {
   els.questionInput?.addEventListener("keydown", handleQuestionKeydown);
   els.inlineSend?.addEventListener("click", handleInlineSend);
   els.inlineInput?.addEventListener("keydown", handleInlineKeydown);
+  els.inspireButton?.addEventListener("click", handleAiDiscoveryClick);
+  els.inlineInspireButton?.addEventListener("click", handleAiDiscoveryClick);
+  els.voiceInputButton?.addEventListener("click", handleVoiceButtonClick);
+  els.mobileVoiceButton?.addEventListener("click", handleVoiceButtonClick);
+  els.inlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
+  els.mobileInlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
   els.questionInput?.addEventListener("input", syncDraftState);
   els.inlineInput?.addEventListener("input", syncDraftState);
   els.moreButton?.addEventListener("click", toggleEvidenceRows);
+  els.evidenceDrawerToggle?.addEventListener("click", toggleEvidenceDrawer);
   els.contextResetButton?.addEventListener("click", resetContext);
   els.contextResetBannerButton?.addEventListener("click", resetContext);
+  bindMobileVoiceHoldEvents();
+  bindEvidenceDrawerGestures();
+  window.addEventListener("resize", syncEvidenceDrawerState);
   syncDraftState();
+  syncEvidenceDrawerState();
   setAskingState(false);
 }
 
@@ -162,13 +192,11 @@ function renderToolbar() {
       <span class="sr-only">品类</span>
       <select id="categorySelect" class="toolbar-select top-filter-select"></select>
     </label>
-    <button class="round discovery-button" id="aiDiscoveryButton" type="button" aria-label="AI 灵感探索" title="AI 灵感探索"><span>↗</span></button>
   `;
 
   const citySelect = $("#citySelect");
   const walkSelect = $("#walkSelect");
   const categorySelect = $("#categorySelect");
-  const aiDiscoveryButton = $("#aiDiscoveryButton");
 
   citySelect.innerHTML = FILTERS.cities.map((city) => `<option value="${escapeHtml(city)}">${escapeHtml(city)}</option>`).join("");
   walkSelect.innerHTML = FILTERS.walkMinutes.map((m) => `<option value="${m}">步行${m}分钟</option>`).join("");
@@ -216,7 +244,6 @@ function renderToolbar() {
     await refreshLocalResults();
   });
 
-  aiDiscoveryButton?.addEventListener("click", handleAiDiscoveryClick);
   renderRankingToolbar();
 }
 
@@ -849,21 +876,29 @@ function renderSuggestions() {
 }
 
 function handleAiDiscoveryClick(event) {
-  if (state.isAsking || !els.questionInput) return;
+  if (state.isAsking) return;
   const button = event?.currentTarget;
+  const targetKey = button?.dataset?.target || "questionInput";
+  const targetInput = targetKey === "inlineQuestion" ? els.inlineInput : els.questionInput;
+  if (!targetInput) return;
   button?.classList.remove("is-spinning");
   button?.offsetWidth;
   button?.classList.add("is-spinning");
 
   const prompt = discoveryPrompts[Math.floor(Math.random() * discoveryPrompts.length)];
-  els.questionInput.value = prompt;
+  targetInput.value = prompt;
   syncDraftState();
+  targetInput.focus();
   window.setTimeout(() => {
     if (state.isAsking) return;
+    if (targetKey === "inlineQuestion") {
+      handleInlineSend();
+      return;
+    }
     if (els.form?.requestSubmit) els.form.requestSubmit();
     else els.form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   }, 180);
-  window.setTimeout(() => button?.classList.remove("is-spinning"), 450);
+  window.setTimeout(() => button?.classList.remove("is-spinning"), 520);
 }
 
 function renderContext() {
@@ -889,6 +924,69 @@ function updateChatMode() {
   document.body.classList.toggle("has-messages", hasMessages);
   els.heroAskCard?.setAttribute("aria-hidden", hasMessages ? "true" : "false");
   els.followupInputBar?.setAttribute("aria-hidden", hasMessages ? "false" : "true");
+}
+
+function initVoiceInput() {
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionCtor) {
+    updateVoiceButtons();
+    return;
+  }
+
+  const recognition = new SpeechRecognitionCtor();
+  recognition.lang = "zh-CN";
+  recognition.interimResults = true;
+  recognition.continuous = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.addEventListener("start", () => {
+    state.voice.isListening = true;
+    updateVoiceButtons();
+    setStatus("语音输入中");
+  });
+
+  recognition.addEventListener("result", (event) => {
+    const transcripts = collectSpeechTranscripts(event);
+    applyVoiceTranscript(transcripts);
+  });
+
+  recognition.addEventListener("error", (event) => {
+    state.voice.pendingTargetKey = "";
+    state.voice.isListening = false;
+    const shouldDiscard = state.voice.cancelOnEnd;
+    state.voice.cancelOnEnd = false;
+    state.voice.mobileHoldActive = false;
+    state.voice.mobileHoldCanceled = false;
+    if (shouldDiscard) restoreVoiceDraft();
+    updateVoiceButtons();
+    setStatus(state.isAsking ? "查询中" : "在线");
+    const message = voiceErrorMessage(event?.error);
+    if (message) showToast(message);
+  });
+
+  recognition.addEventListener("end", () => {
+    state.voice.isListening = false;
+    const shouldDiscard = state.voice.cancelOnEnd;
+    state.voice.cancelOnEnd = false;
+    state.voice.mobileHoldActive = false;
+    state.voice.mobileHoldCanceled = false;
+    if (shouldDiscard) {
+      restoreVoiceDraft();
+      showToast("已取消语音输入");
+    }
+    updateVoiceButtons();
+    syncDraftState();
+    setStatus(state.isAsking ? "查询中" : "在线");
+    if (state.voice.pendingTargetKey) {
+      const nextTargetKey = state.voice.pendingTargetKey;
+      state.voice.pendingTargetKey = "";
+      startVoiceRecognition(nextTargetKey);
+    }
+  });
+
+  state.voice.supported = true;
+  state.voice.recognition = recognition;
+  updateVoiceButtons();
 }
 
 function resetContext() {
@@ -992,6 +1090,37 @@ async function handleInlineKeydown(event) {
   if (event.key !== "Enter") return;
   event.preventDefault();
   await handleInlineSend();
+}
+
+function handleVoiceButtonClick(event) {
+  const button = event.currentTarget;
+  const targetKey = button?.dataset?.target || "questionInput";
+  if (!state.voice.supported || !state.voice.recognition) {
+    showToast("当前环境暂不支持语音输入，请使用文字描述");
+    return;
+  }
+  if (state.isAsking) return;
+  if (isMobileHoldVoiceButton(button) && isMobileViewport()) {
+    if (state.voice.suppressNextMobileClick) {
+      state.voice.suppressNextMobileClick = false;
+      return;
+    }
+    showToast("请长按说话，上滑取消");
+    return;
+  }
+
+  if (state.voice.isListening) {
+    if (state.voice.targetKey === targetKey) {
+      state.voice.pendingTargetKey = "";
+      state.voice.recognition.stop();
+      return;
+    }
+    state.voice.pendingTargetKey = targetKey;
+    state.voice.recognition.stop();
+    return;
+  }
+
+  startVoiceRecognition(targetKey);
 }
 
 async function askAgent(question) {
@@ -1437,6 +1566,9 @@ function setEvidenceRows(rows, initialLimit = 6) {
   state.evidenceRows = Array.isArray(rows) ? rows : [];
   state.evidenceInitialLimit = initialLimit;
   state.evidenceExpanded = state.evidenceRows.length <= initialLimit;
+  if (!state.mobileDrawerExpanded && isMobileViewport() && state.evidenceRows.length) {
+    state.mobileDrawerExpanded = false;
+  }
   renderEvidenceRows();
 }
 
@@ -1446,6 +1578,7 @@ function setEvidenceNotice(message) {
   if (els.evidence) els.evidence.innerHTML = `<p class="empty">${escapeHtml(message)}</p>`;
   updateMoreButton();
   syncEvidenceScrollbarWidth();
+  syncEvidenceDrawerState();
 }
 
 function renderEvidenceRows() {
@@ -1454,6 +1587,7 @@ function renderEvidenceRows() {
   els.evidence.innerHTML = state.evidenceRows.slice(0, visibleCount).join("");
   updateMoreButton();
   syncEvidenceScrollbarWidth();
+  syncEvidenceDrawerState();
 }
 
 function syncEvidenceScrollbarWidth() {
@@ -1466,6 +1600,9 @@ function syncEvidenceScrollbarWidth() {
 }
 
 function toggleEvidenceRows() {
+  if (isMobileViewport() && !state.mobileDrawerExpanded) {
+    state.mobileDrawerExpanded = true;
+  }
   if (!state.evidenceRows.length || state.evidenceRows.length <= state.evidenceInitialLimit) return;
   state.evidenceExpanded = !state.evidenceExpanded;
   renderEvidenceRows();
@@ -1484,6 +1621,149 @@ function updateMoreButton() {
   els.moreButton.textContent = state.evidenceExpanded ? "收起" : `查看更多（${total - state.evidenceInitialLimit}）`;
 }
 
+function toggleEvidenceDrawer() {
+  setEvidenceDrawerExpanded(!state.mobileDrawerExpanded);
+}
+
+function setEvidenceDrawerExpanded(expanded) {
+  state.mobileDrawerExpanded = Boolean(expanded);
+  syncEvidenceDrawerState();
+}
+
+function syncEvidenceDrawerState() {
+  if (!els.evidenceDrawer || !els.evidenceDrawerToggle) return;
+  const mobile = isMobileViewport();
+  const expanded = mobile ? state.mobileDrawerExpanded : true;
+  els.evidenceDrawer.classList.toggle("is-collapsed", mobile && !expanded);
+  els.evidenceDrawer.classList.toggle("is-expanded", mobile && expanded);
+  els.evidenceDrawerToggle.setAttribute("aria-expanded", String(expanded));
+  els.evidenceDrawerToggle.setAttribute("aria-label", expanded ? "收起附近结果列表" : "展开附近结果列表");
+  const handleText = els.evidenceDrawerToggle.querySelector(".drawer-handle-text");
+  if (handleText) handleText.textContent = expanded ? "收起结果" : "附近结果";
+}
+
+function bindEvidenceDrawerGestures() {
+  if (!els.evidenceDrawerToggle) return;
+  let startY = 0;
+  let tracking = false;
+
+  els.evidenceDrawerToggle.addEventListener(
+    "touchstart",
+    (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch || !isMobileViewport()) return;
+      tracking = true;
+      startY = touch.clientY;
+    },
+    { passive: true }
+  );
+
+  els.evidenceDrawerToggle.addEventListener(
+    "touchend",
+    (event) => {
+      if (!tracking || !isMobileViewport()) return;
+      tracking = false;
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const deltaY = touch.clientY - startY;
+      if (deltaY <= -28) {
+        setEvidenceDrawerExpanded(true);
+      } else if (deltaY >= 28) {
+        setEvidenceDrawerExpanded(false);
+      }
+    },
+    { passive: true }
+  );
+}
+
+function isMobileViewport() {
+  return window.matchMedia("(max-width: 767px)").matches;
+}
+
+function bindMobileVoiceHoldEvents() {
+  [els.mobileVoiceButton, els.mobileInlineVoiceButton].forEach((button) => {
+    if (!button) return;
+
+    button.addEventListener(
+      "touchstart",
+      (event) => {
+        if (!isMobileViewport()) return;
+        if (!state.voice.supported || !state.voice.recognition) {
+          showToast("当前环境暂不支持语音输入，请使用文字描述");
+          return;
+        }
+        if (state.isAsking) return;
+        const touch = event.changedTouches?.[0];
+        if (!touch) return;
+        event.preventDefault();
+        state.voice.suppressNextMobileClick = true;
+        state.voice.mobileHoldActive = true;
+        state.voice.mobileHoldCanceled = false;
+        state.voice.mobileHoldStartY = touch.clientY;
+        state.voice.cancelOnEnd = false;
+        updateVoiceButtons();
+        startVoiceRecognition(button.dataset.target || "questionInput");
+      },
+      { passive: false }
+    );
+
+    button.addEventListener(
+      "touchmove",
+      (event) => {
+        if (!state.voice.mobileHoldActive || !isMobileViewport()) return;
+        const touch = event.changedTouches?.[0];
+        if (!touch) return;
+        const movedUp = state.voice.mobileHoldStartY - touch.clientY;
+        const shouldCancel = movedUp >= 56;
+        if (state.voice.mobileHoldCanceled !== shouldCancel) {
+          state.voice.mobileHoldCanceled = shouldCancel;
+          updateVoiceButtons();
+        }
+      },
+      { passive: true }
+    );
+
+    const finalizeHold = (event, forceCancel = false) => {
+      if (!state.voice.mobileHoldActive || !isMobileViewport()) return;
+      event?.preventDefault?.();
+      state.voice.suppressNextMobileClick = true;
+      state.voice.cancelOnEnd = forceCancel || state.voice.mobileHoldCanceled;
+      state.voice.mobileHoldActive = false;
+      state.voice.mobileHoldCanceled = forceCancel || state.voice.mobileHoldCanceled;
+      if (state.voice.isListening) {
+        try {
+          state.voice.recognition?.stop();
+        } catch {
+          if (state.voice.cancelOnEnd) {
+            restoreVoiceDraft();
+            showToast("已取消语音输入");
+          }
+          state.voice.cancelOnEnd = false;
+          state.voice.mobileHoldCanceled = false;
+          updateVoiceButtons();
+          syncDraftState();
+        }
+      } else {
+        if (state.voice.cancelOnEnd) {
+          restoreVoiceDraft();
+          showToast("已取消语音输入");
+        }
+        state.voice.cancelOnEnd = false;
+        state.voice.mobileHoldCanceled = false;
+        updateVoiceButtons();
+        syncDraftState();
+      }
+    };
+
+    button.addEventListener("touchend", (event) => finalizeHold(event, false), { passive: false });
+    button.addEventListener("touchcancel", (event) => finalizeHold(event, true), { passive: false });
+  });
+}
+
+function isMobileHoldVoiceButton(button) {
+  return Boolean(button?.classList?.contains("mobile-voice-cta"));
+}
+
 function setAskingState(isAsking) {
   state.isAsking = isAsking;
   document.body.classList.toggle("is-asking", isAsking);
@@ -1496,6 +1776,11 @@ function setAskingState(isAsking) {
     els.inlineSend.disabled = isAsking;
     els.inlineSend.textContent = isAsking ? "..." : "➤";
   }
+  if (isAsking && state.voice.isListening && state.voice.recognition) {
+    state.voice.pendingTargetKey = "";
+    state.voice.recognition.stop();
+  }
+  updateVoiceButtons();
   syncDraftState();
 }
 
@@ -1507,6 +1792,119 @@ function syncDraftState() {
   els.inlineSend?.classList.toggle("is-ready", hasInlineDraft && !state.isAsking);
 }
 
+function startVoiceRecognition(targetKey) {
+  const input = inputElementByKey(targetKey);
+  if (!input || !state.voice.recognition) return;
+
+  state.voice.targetKey = targetKey;
+  state.voice.baseText = input.value || "";
+  input.focus();
+  try {
+    state.voice.recognition.start();
+  } catch {
+    showToast("语音输入暂时没有成功启动，请再点一次试试");
+  }
+}
+
+function inputElementByKey(key) {
+  if (key === "inlineQuestion") return els.inlineInput;
+  return els.questionInput;
+}
+
+function collectSpeechTranscripts(event) {
+  let finalText = "";
+  let interimText = "";
+  for (let index = 0; index < event.results.length; index += 1) {
+    const result = event.results[index];
+    const transcript = String(result?.[0]?.transcript || "");
+    if (result?.isFinal) finalText += transcript;
+    else interimText += transcript;
+  }
+  return {
+    finalText: normalizeSpeechText(finalText),
+    interimText: normalizeSpeechText(interimText)
+  };
+}
+
+function applyVoiceTranscript({ finalText = "", interimText = "" }) {
+  const input = inputElementByKey(state.voice.targetKey);
+  if (!input) return;
+
+  const separator = state.voice.baseText && !/\s$/.test(state.voice.baseText) ? " " : "";
+  const composed = `${state.voice.baseText}${separator}${finalText || interimText}`.trim();
+  input.value = composed;
+  syncDraftState();
+}
+
+function normalizeSpeechText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function restoreVoiceDraft() {
+  const input = inputElementByKey(state.voice.targetKey);
+  if (!input) return;
+  input.value = state.voice.baseText || "";
+}
+
+function updateVoiceButtons() {
+  const buttons = [els.voiceInputButton, els.mobileVoiceButton, els.inlineVoiceButton, els.mobileInlineVoiceButton];
+  for (const button of buttons) {
+    if (!button) continue;
+    button.hidden = !state.voice.supported;
+    button.disabled = state.isAsking;
+    const isCurrentTarget = button.dataset.target === state.voice.targetKey;
+    button.classList.toggle("is-listening", state.voice.isListening && isCurrentTarget);
+    button.classList.toggle("is-pressing", isMobileHoldVoiceButton(button) && state.voice.mobileHoldActive && isCurrentTarget && !state.voice.mobileHoldCanceled);
+    button.classList.toggle("is-canceling", isMobileHoldVoiceButton(button) && state.voice.mobileHoldCanceled && isCurrentTarget);
+    button.setAttribute("aria-pressed", state.voice.isListening && isCurrentTarget ? "true" : "false");
+    button.title = state.voice.isListening && isCurrentTarget ? "结束语音输入" : "语音输入";
+    const label = button.querySelector("span");
+    if (label && button.classList.contains("mobile-voice-cta")) {
+      if (state.voice.mobileHoldCanceled && isCurrentTarget) {
+        label.textContent = "松开取消发送";
+      } else if (state.voice.mobileHoldActive && isCurrentTarget) {
+        label.textContent = "松开发送，上滑取消";
+      } else {
+        label.textContent = "按住说话";
+      }
+    }
+  }
+}
+
+function voiceErrorMessage(code) {
+  if (code === "not-allowed" || code === "service-not-allowed") {
+    return "没有拿到麦克风权限，请先允许浏览器使用麦克风";
+  }
+  if (code === "audio-capture") {
+    return "没有检测到可用麦克风，请检查手机或浏览器权限";
+  }
+  if (code === "no-speech") {
+    return "没有听到清晰语音，请再试一次";
+  }
+  if (code === "network") {
+    return "语音识别网络有点不稳，请稍后重试";
+  }
+  if (code === "aborted") return "";
+  return "当前环境暂不支持语音输入，请使用文字描述";
+}
+
+function showToast(message) {
+  if (!message) return;
+  let toast = document.querySelector(".app-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "app-toast";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.remove("is-visible");
+  window.clearTimeout(showToast.timer);
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  showToast.timer = window.setTimeout(() => {
+    toast.classList.remove("is-visible");
+  }, 2200);
+}
+
 function renderMapLegend() {
   const mapWrap = document.querySelector(".map-wrap");
   if (!mapWrap) return;
@@ -1514,10 +1912,27 @@ function renderMapLegend() {
   const legend = document.createElement("div");
   legend.className = "map-legend";
   legend.innerHTML = `
-    <span><i class="legend-dot bichibang"></i>${escapeHtml(state.filters.category)}</span>
-    <span><i class="legend-dot saojiebang"></i>步行 ${state.filters.walkMinutes} 分钟</span>
+    <span><i class="legend-icon legend-icon-pin" aria-hidden="true">${legendPinSvg()}</i>美食/店铺</span>
+    <span><i class="legend-icon legend-icon-radius" aria-hidden="true">${legendRadiusSvg()}</i>步行范围</span>
   `;
   mapWrap.appendChild(legend);
+}
+
+function legendPinSvg() {
+  return `
+    <svg viewBox="0 0 24 24" focusable="false">
+      <path d="M12 2.8c-3.7 0-6.7 3-6.7 6.7 0 4.9 5.1 9.5 6.1 10.4a.9.9 0 0 0 1.2 0c1-.9 6.1-5.5 6.1-10.4 0-3.7-3-6.7-6.7-6.7Z" />
+      <circle cx="12" cy="9.6" r="3" />
+    </svg>
+  `;
+}
+
+function legendRadiusSvg() {
+  return `
+    <svg viewBox="0 0 24 24" focusable="false">
+      <circle cx="12" cy="12" r="7.5" />
+    </svg>
+  `;
 }
 
 function renderEvidenceNotice(message) {
