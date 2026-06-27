@@ -1,6 +1,6 @@
 # Codex Project Context
 
-Last updated: 2026-06-25
+Last updated: 2026-06-27
 
 This file is the main handoff note for new Codex chats in this workspace. When a new chat starts, read this file first before changing code.
 
@@ -19,6 +19,8 @@ This file is the main handoff note for new Codex chats in this workspace. When a
 - If working locally, report changed files and verification status. Do not dump large full-file code unless the user explicitly asks.
 - Keep the main local port fixed at `5177`. Port `5188` was only a temporary test port in earlier work.
 - The user is non-technical and prefers direct background edits plus concise summaries.
+- Weekend cross-device work uses `codex/weekend-handoff-20260627`. Do not merge it to `main` or deploy Render without explicit user approval.
+- For a new computer or new Codex chat, read both `CODEX_CONTEXT.md` and `WEEKEND_HANDOFF.md`.
 
 ## Important Source Threads Read
 
@@ -183,6 +185,14 @@ Current important endpoints:
 - Results are no longer limited to only the first 6 forever.
 - "查看更多" should expand/collapse or reveal more `allPois`.
 - Top and bottom send buttons should be disabled together during requests to prevent concurrent context corruption.
+- Cities without imported ranking data must use local AMap nearby fallback and must never show Shanghai ranking entries.
+- Local fallback and ranking rows are sorted by real distance ascending; ratings come from AMap `biz_ext.rating`.
+
+### AI Discovery
+
+- The top-right circular arrow is the AI inspiration/discovery action, not a static fit-map button.
+- Clicking it selects a curated discovery prompt, fills the main input, animates the arrow, and automatically submits.
+- The local `normalizeCityDisplay is not defined` regression was fixed by adding the missing display normalization helper.
 
 ### Ranking Layer
 
@@ -349,6 +359,9 @@ The latest known local baseline after the most recent thread:
 - `/api/agent/stream` with the 人民广场/本帮菜 question no longer returns error.
 - It returned stable `nearby`, `radius: 1200`, `keywords: 本帮菜`, and many `allPois` entries.
 - Service was restarted on `http://127.0.0.1:5177`.
+- AI Discovery was browser-tested locally: click -> random prompt -> automatic submit -> map/evidence response.
+- Current local-only files before the weekend handoff commit: `public/app.js` and `public/styles.css`.
+- Cross-device instructions live in `WEEKEND_HANDOFF.md`; home setup helper is `scripts/setup-home.ps1`.
 
 Because files are currently modified in the working tree, re-verify before making new feature changes.
 
@@ -384,6 +397,7 @@ Recommended process:
 4. If changing backend behavior, restart Node before validating.
 5. If changing front-end JS/CSS, bump resource version in `public/index.html` and `public/mobile.html` if the browser may cache old assets.
 6. Preserve the user rule: no GitHub/Render deployment without explicit consent.
+7. For weekend work, stay on `codex/weekend-handoff-20260627`.
 
 ## Quick Test Prompts
 

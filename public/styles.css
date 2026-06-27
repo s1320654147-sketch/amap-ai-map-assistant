@@ -749,6 +749,32 @@ body.mobile-page.has-messages .mobile-ask {
   color: var(--text);
 }
 
+.discovery-button {
+  display: grid;
+  place-items: center;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.discovery-button span {
+  display: inline-block;
+  transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.discovery-button:hover {
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.discovery-button.is-spinning {
+  background: var(--teal-soft);
+  box-shadow: 0 0 0 5px rgba(0, 122, 100, 0.12);
+  color: var(--teal);
+}
+
+.discovery-button.is-spinning span {
+  transform: rotate(360deg);
+}
+
 .map-wrap {
   min-height: 0;
   position: relative;

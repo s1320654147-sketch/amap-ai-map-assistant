@@ -91,6 +91,13 @@ const suggestions = [
   }
 ];
 
+const discoveryPrompts = [
+  "帮我找一家附近适合朋友聚会、有特色且环境安静的宝藏餐厅",
+  "推荐附近步行范围内，当地人评价极高、排队也要吃的隐藏市井小吃",
+  "附近有什么适合下午办公、有插座且咖啡品质不错的安静咖啡馆？",
+  "推荐一家适合周末晚上约会、审美在线的情调意式餐厅或小酒馆"
+];
+
 init();
 
 async function init() {
@@ -153,13 +160,13 @@ function renderToolbar() {
       <span class="sr-only">品类</span>
       <select id="categorySelect" class="toolbar-select top-filter-select"></select>
     </label>
-    <button class="round" id="fitMapButton" type="button" aria-label="适配地图视野">↗</button>
+    <button class="round discovery-button" id="aiDiscoveryButton" type="button" aria-label="AI 灵感探索" title="AI 灵感探索"><span>↗</span></button>
   `;
 
   const citySelect = $("#citySelect");
   const walkSelect = $("#walkSelect");
   const categorySelect = $("#categorySelect");
-  const fitMapButton = $("#fitMapButton");
+  const aiDiscoveryButton = $("#aiDiscoveryButton");
 
   citySelect.innerHTML = FILTERS.cities.map((city) => `<option value="${escapeHtml(city)}">${escapeHtml(city)}</option>`).join("");
   walkSelect.innerHTML = FILTERS.walkMinutes.map((m) => `<option value="${m}">步行${m}分钟</option>`).join("");
@@ -191,7 +198,7 @@ function renderToolbar() {
     await refreshLocalResults();
   });
 
-  fitMapButton?.addEventListener("click", fitMap);
+  aiDiscoveryButton?.addEventListener("click", handleAiDiscoveryClick);
   renderRankingToolbar();
 }
 
@@ -761,6 +768,24 @@ function renderSuggestions() {
       els.questionInput.focus();
     });
   });
+}
+
+function handleAiDiscoveryClick(event) {
+  if (state.isAsking || !els.questionInput) return;
+  const button = event?.currentTarget;
+  button?.classList.remove("is-spinning");
+  button?.offsetWidth;
+  button?.classList.add("is-spinning");
+
+  const prompt = discoveryPrompts[Math.floor(Math.random() * discoveryPrompts.length)];
+  els.questionInput.value = prompt;
+  syncDraftState();
+  window.setTimeout(() => {
+    if (state.isAsking) return;
+    if (els.form?.requestSubmit) els.form.requestSubmit();
+    else els.form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  }, 180);
+  window.setTimeout(() => button?.classList.remove("is-spinning"), 450);
 }
 
 function renderContext() {
@@ -1532,6 +1557,13 @@ function normalizeCityName(value) {
   if (["北京", "上海", "天津", "重庆"].includes(text)) return `${text}市`;
   if (/(市|区|县|旗|盟|州|地区|特别行政区)$/.test(text)) return text;
   return `${text}市`;
+}
+
+function normalizeCityDisplay(value) {
+  const text = cleanText(value);
+  if (!text) return "";
+  if (["北京", "上海", "天津", "重庆"].includes(text)) return `${text}市`;
+  return text;
 }
 
 function cleanText(value) {
