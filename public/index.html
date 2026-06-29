@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
     <title>高德 AI 地图助手</title>
     <link rel="stylesheet" href="/styles.css?v=20260627-ux" />
   </head>
@@ -12,7 +12,7 @@
         <nav class="rail" aria-label="主导航">
           <div class="rail-logo">AI</div>
           <button class="rail-item active is-active" id="conversationRailTab" type="button" data-view="chat"><span>⌁</span><em>对话</em></button>
-          <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>◌</span><em>搜索</em></button>
+          <button class="rail-item" id="searchRailTab" type="button" data-view="search"><span>◌</span><em>搜索</em></button>
           <button class="rail-item" id="favoritesRailTab" type="button" data-view="favorites"><span>☆</span><em>收藏</em></button>
           <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>▣</span><em>分析</em></button>
           <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>⚙</span><em>设置</em></button>
@@ -34,17 +34,12 @@
                   <span>高德地图</span>
                 </div>
               </div>
-              <div class="brand-subtitle">AI 智能地理助手</div>
-              <h1>AI 地图助手</h1>
+              <span class="header-inline-title">AI 地图助手</span>
             </div>
           </header>
 
           <section class="ask-card input-card-container" id="heroAskCard">
             <span class="engine-powered-tag">⚡ DeepSeek 模型驱动 ｜ 📍 高德数据实况</span>
-            <div class="context-bar" id="contextBar">
-              <span class="context-text">当前上下文：未锁定地点</span>
-              <button class="context-reset" id="contextResetButton" type="button">重置</button>
-            </div>
             <form id="agentForm" class="ask-form">
               <textarea
                 id="questionInput"
@@ -81,42 +76,58 @@
             <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么值得去的地方？”</div>
           </section>
 
-          <section class="chat-stream">
-            <div class="context-banner" id="contextBanner">
-              <span class="context-banner-icon">⌁</span>
-              <span class="context-banner-text">当前搜索范围：未锁定地点</span>
-              <button class="context-reset context-reset-banner" id="contextResetBannerButton" type="button">重置</button>
-            </div>
-            <section class="conversation" id="conversation" aria-live="polite"></section>
-          </section>
+          <section class="chat-panel" id="chatPanel" aria-live="polite">
+            <button
+              class="chat-panel-header"
+              id="chatPanelToggle"
+              type="button"
+              aria-expanded="true"
+              aria-controls="conversation"
+              aria-label="收起聊天面板"
+            >
+              <span class="chat-panel-header-copy">
+                <strong class="chat-panel-title">聊天记录</strong>
+                <span class="chat-panel-hint" id="chatPanelHint">点击收起，把更多空间留给地图</span>
+              </span>
+              <span class="chat-panel-chevron" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="m7 10 5 5 5-5" />
+                </svg>
+              </span>
+            </button>
 
-          <footer class="chat-input" id="followupInputBar">
-            <input id="inlineQuestion" type="text" placeholder="继续提问..." />
-            <button class="inspire-fab inspire-fab-inline" id="inlineInspireButton" type="button" aria-label="获取提问灵感" title="获取提问灵感" data-target="inlineQuestion">
-              <svg class="inspire-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 3 13.9 8.1 19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" />
-                <path d="M18 3 18.8 5.2 21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z" />
-              </svg>
-            </button>
-            <button class="voice-fab voice-fab-inline" id="inlineVoiceButton" type="button" aria-label="语音输入" title="语音输入" data-target="inlineQuestion" hidden>
-              <svg class="voice-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
-                <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
-                <path d="M12 17v3" />
-                <path d="M9 20h6" />
-              </svg>
-            </button>
-            <button id="inlineSend" type="button">➤</button>
-            <button class="mobile-voice-cta mobile-voice-cta-inline" id="mobileInlineVoiceButton" type="button" aria-label="点击开始语音" title="点击开始语音" data-target="inlineQuestion" hidden>
-              <svg class="voice-icon mobile-voice-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
-                <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
-                <path d="M12 17v3" />
-                <path d="M9 20h6" />
-              </svg>
-              <span>点击开始语音</span>
-            </button>
-          </footer>
+            <section class="chat-stream">
+              <section class="conversation" id="conversation" aria-live="polite"></section>
+            </section>
+
+            <footer class="chat-input" id="followupInputBar">
+              <input id="inlineQuestion" type="text" placeholder="继续提问..." />
+              <button class="inspire-fab inspire-fab-inline" id="inlineInspireButton" type="button" aria-label="获取提问灵感" title="获取提问灵感" data-target="inlineQuestion">
+                <svg class="inspire-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3 13.9 8.1 19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" />
+                  <path d="M18 3 18.8 5.2 21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z" />
+                </svg>
+              </button>
+              <button class="voice-fab voice-fab-inline" id="inlineVoiceButton" type="button" aria-label="语音输入" title="语音输入" data-target="inlineQuestion" hidden>
+                <svg class="voice-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+                  <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+                  <path d="M12 17v3" />
+                  <path d="M9 20h6" />
+                </svg>
+              </button>
+              <button id="inlineSend" type="button">➤</button>
+              <button class="mobile-voice-cta mobile-voice-cta-inline" id="mobileInlineVoiceButton" type="button" aria-label="点击开始语音" title="点击开始语音" data-target="inlineQuestion" hidden>
+                <svg class="voice-icon mobile-voice-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+                  <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+                  <path d="M12 17v3" />
+                  <path d="M9 20h6" />
+                </svg>
+                <span>点击开始语音</span>
+              </button>
+            </footer>
+          </section>
         </div>
       </section>
 
@@ -159,6 +170,20 @@
         </header>
         <div class="favorites-panel-body" id="favoritesList"></div>
       </section>
+
+      <section class="search-panel" id="searchPanel" aria-hidden="true">
+        <header class="search-panel-header">
+          <div>
+            <p class="search-panel-eyebrow">Quick Collect</p>
+            <h2>搜索地点</h2>
+          </div>
+          <span class="search-panel-count" id="searchResultCount">输入关键词开始搜索</span>
+        </header>
+        <form class="search-panel-form" id="searchPanelForm">
+          <input id="searchPanelInput" type="search" placeholder="搜索停车场、大厦、咖啡馆、地标..." autocomplete="off" />
+        </form>
+        <div class="search-panel-body" id="searchPanelResults"></div>
+      </section>
     </main>
 
     <nav class="mobile-bottom-nav" aria-label="移动端主导航">
@@ -178,7 +203,7 @@
         </svg>
         <span>收藏</span>
       </button>
-      <button class="mobile-nav-item" type="button" title="搜索">
+      <button class="mobile-nav-item" id="mobileSearchTab" type="button" title="搜索" data-view="search">
         <svg class="mobile-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="11" cy="11" r="5.5" />
           <path d="M16 16 20 20" />
@@ -193,6 +218,25 @@
         <span>设置</span>
       </button>
     </nav>
+
+    <div class="note-sheet-backdrop" id="favoriteNoteSheet" hidden>
+      <div class="note-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="favoriteNoteTitle">
+        <div class="note-sheet-grabber" aria-hidden="true"></div>
+        <div class="note-sheet-head">
+          <div>
+            <p class="note-sheet-eyebrow">私人标签</p>
+            <h3 id="favoriteNoteTitle">给这个地点加一句备注</h3>
+          </div>
+          <button class="note-sheet-close" id="favoriteNoteCancel" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="note-sheet-place" id="favoriteNotePlace"></p>
+        <input id="favoriteNoteInput" type="text" maxlength="60" placeholder="例如：闲鱼有券 10元/小时 / 入口在侧门" />
+        <div class="note-sheet-actions">
+          <button class="note-sheet-skip" id="favoriteNoteSkip" type="button">跳过</button>
+          <button class="note-sheet-save" id="favoriteNoteSave" type="button">保存收藏</button>
+        </div>
+      </div>
+    </div>
 
     <script src="/app.js?v=20260627-ux" type="module"></script>
   </body>
