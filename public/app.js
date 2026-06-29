@@ -3,6 +3,10 @@ const $ = (selector) => document.querySelector(selector);
 const els = {
   status: $("#status"),
   plannerBadge: $("#plannerBadge"),
+  conversationRailTab: $("#conversationRailTab"),
+  favoritesRailTab: $("#favoritesRailTab"),
+  mobileConversationTab: $("#mobileConversationTab"),
+  mobileFavoritesTab: $("#mobileFavoritesTab"),
   form: $("#agentForm"),
   questionInput: $("#questionInput"),
   inspireButton: $("#inspireButton"),
@@ -27,7 +31,10 @@ const els = {
   contextResetButton: $("#contextResetButton"),
   contextResetBannerButton: $("#contextResetBannerButton"),
   searchHint: $("#searchHint"),
-  mapToolbar: $(".map-toolbar")
+  mapToolbar: $(".map-toolbar"),
+  favoritesPanel: $("#favoritesPanel"),
+  favoritesList: $("#favoritesList"),
+  favoritesCount: $("#favoritesCount")
 };
 
 const FILTERS = {
@@ -40,8 +47,11 @@ const FILTERS = {
 };
 
 const RANKING_CITY_NAMES = new Set(["上海", "上海市"]);
+const FAVORITES_STORAGE_KEY = "amap_favorites";
+const GUIDE_STORAGE_KEY = "amap_guided";
 
 const state = {
+  activeView: "chat",
   location: {
     city: FILTERS.defaultCity,
     district: "",
@@ -67,10 +77,16 @@ const state = {
     viewportCity: "",
     viewportCenter: null
   },
+  layers: {
+    walkRadius: true,
+    pois: true,
+    rankings: true
+  },
   evidenceRows: [],
   evidenceInitialLimit: 6,
   evidenceExpanded: false,
   mobileDrawerExpanded: false,
+  favorites: [],
   isAsking: false,
   voice: {
     supported: false,
@@ -88,26 +104,31 @@ const state = {
 };
 
 let map = null;
-let overlays = [];
+let baseOverlays = [];
+let walkRadiusOverlays = [];
+let poiOverlays = [];
 let rankingOverlays = [];
 let rankingInfoWindow = null;
+let favoritePreviewOverlay = null;
+let poiInfoWindow = null;
+let guideDismissTimer = 0;
 
 const suggestions = [
   {
-    label: () => `${currentAreaLabel()}附近`,
-    question: () => `${currentAreaLabel()}附近有什么值得吃的？`
-  },
-  {
     label: () => "AI推荐",
     question: () => `按我当前定位，推荐${currentAreaLabel()}附近适合现在去的地方。`
+  },
+  {
+    label: () => `${currentAreaLabel()}附近`,
+    question: () => `${currentAreaLabel()}附近有什么值得吃的？`
   },
   {
     label: () => "步行5分钟",
     question: () => `帮我找${currentAreaLabel()}附近步行5分钟内的咖啡馆。`
   },
   {
-    label: () => "电影院",
-    question: () => `${currentAreaLabel()}附近有哪些电影院？`
+    label: () => "商场",
+    question: () => `${currentAreaLabel()}附近有哪些值得逛的商场？`
   }
 ];
 
@@ -121,17 +142,27 @@ const discoveryPrompts = [
 init();
 
 async function init() {
+  syncViewportHeight();
   restoreLocation();
+  loadFavorites();
   renderToolbar();
   bindEvents();
   initVoiceInput();
   renderSuggestions();
   renderContext();
+  renderFavoritesPanel();
   updateChatMode();
+  showFirstVisitGuide();
   await initMap();
 }
 
 function bindEvents() {
+  [els.conversationRailTab, els.mobileConversationTab].forEach((button) =>
+    button?.addEventListener("click", () => setActiveView("chat"))
+  );
+  [els.favoritesRailTab, els.mobileFavoritesTab].forEach((button) =>
+    button?.addEventListener("click", () => setActiveView("favorites"))
+  );
   els.form?.addEventListener("submit", handleQuestionSubmit);
   els.questionInput?.addEventListener("keydown", handleQuestionKeydown);
   els.inlineSend?.addEventListener("click", handleInlineSend);
@@ -148,12 +179,45 @@ function bindEvents() {
   els.evidenceDrawerToggle?.addEventListener("click", toggleEvidenceDrawer);
   els.contextResetButton?.addEventListener("click", resetContext);
   els.contextResetBannerButton?.addEventListener("click", resetContext);
+  els.conversation?.addEventListener("click", handlePlaceCardInteraction);
+  els.favoritesList?.addEventListener("click", handlePlaceCardInteraction);
+  window.addEventListener("favorites-changed", handleFavoritesChanged);
   bindMobileVoiceHoldEvents();
   bindEvidenceDrawerGestures();
+  window.addEventListener("resize", syncViewportHeight);
+  window.addEventListener("orientationchange", syncViewportHeight);
+  window.visualViewport?.addEventListener("resize", syncViewportHeight);
+  window.visualViewport?.addEventListener("scroll", syncViewportHeight);
   window.addEventListener("resize", syncEvidenceDrawerState);
   syncDraftState();
   syncEvidenceDrawerState();
   setAskingState(false);
+}
+
+function loadFavorites() {
+  try {
+    const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
+    const favorites = JSON.parse(raw || "[]");
+    state.favorites = Array.isArray(favorites) ? favorites.filter(Boolean).map(normalizeFavoriteRecord) : [];
+  } catch {
+    state.favorites = [];
+  }
+}
+
+function saveFavorites() {
+  try {
+    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(state.favorites));
+  } catch {
+    // ignore storage failure
+  }
+}
+
+function syncViewportHeight() {
+  const viewportHeight = Math.round(
+    window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+  );
+  if (!viewportHeight) return;
+  document.documentElement.style.setProperty("--app-height", `${viewportHeight}px`);
 }
 
 function restoreLocation() {
@@ -263,21 +327,26 @@ function renderRankingToolbar() {
   const bar = document.createElement("div");
   bar.className = "ranking-toolbar";
   bar.innerHTML = options
-    .map(
-      (item) =>
-        `<button type="button" class="ranking-filter ranking-filter--${item.key}${state.rankings.mode === item.key ? " is-active" : ""}" data-mode="${item.key}">${rankingFilterIcon(item.key)}<span>${item.label}</span></button>`
-    )
+    .map((item) => {
+      const isActive = state.rankings.mode === item.key || (item.key === "all" && state.rankings.mode === "all");
+      const isNone = item.key === "all" && state.rankings.mode === "none";
+      return `<button type="button" class="ranking-filter ranking-filter--${item.key}${isActive ? " is-active" : ""}${isNone ? " is-none" : ""}" data-mode="${item.key}">${rankingFilterIcon(item.key)}<span>${item.label}</span></button>`;
+    })
     .join("");
 
   bar.querySelectorAll("button").forEach((button) => {
     button.addEventListener("click", () => {
-      state.rankings.mode = button.dataset.mode || "all";
+      const mode = button.dataset.mode || "all";
+      state.rankings.mode = mode === "all"
+        ? (state.rankings.mode === "all" ? "none" : "all")
+        : mode;
       renderRankingToolbar();
       renderRankingLayer();
     });
   });
 
   mapWrap.appendChild(bar);
+  renderLayerToggles();
 }
 
 function rankingFilterIcon(mode) {
@@ -381,8 +450,7 @@ function renderRankingLayer() {
         direction: "top"
       }
     });
-    originMarker.setMap(map);
-    rankingOverlays.push(originMarker);
+    addMapOverlay("base", originMarker);
 
     const circle = new window.AMap.Circle({
       center: origin,
@@ -394,8 +462,7 @@ function renderRankingLayer() {
       fillColor: "#008f81",
       fillOpacity: 0.08
     });
-    circle.setMap(map);
-    rankingOverlays.push(circle);
+    addMapOverlay("walkRadius", circle);
   }
 
   mapEntries.forEach((entry) => {
@@ -409,12 +476,14 @@ function renderRankingLayer() {
       zIndex: 80
     });
     marker.on("click", () => openRankingInfo(entry, marker.getPosition()));
-    marker.setMap(map);
-    rankingOverlays.push(marker);
+    addMapOverlay("rankings", marker);
   });
 
   state.mapBounds = [];
   renderMapLegend();
+  renderLayerToggles();
+  applyLayerVisibility();
+  fitMap();
 }
 
 function renderRankingEvidence(entries) {
@@ -441,6 +510,7 @@ function renderRankingEvidence(entries) {
 }
 
 function filterRankingMarkers(markers) {
+  if (!state.layers.rankings || state.rankings.mode === "none") return [];
   if (state.rankings.mode === "all") return markers;
   if (state.rankings.mode === "multi") return markers.filter((item) => item.rankingCategory === "multi");
   return markers.filter((item) => Array.isArray(item.categories) && item.categories.includes(state.rankings.mode));
@@ -509,15 +579,44 @@ function openRankingInfo(entry, position) {
   const price = entry.price ? `人均 ${escapeHtml(String(entry.price))}` : "人均未标注";
   const cuisine = entry.cuisine ? escapeHtml(entry.cuisine) : "菜系未标注";
   const labels = (entry.labels || []).map((label) => `<span>${escapeHtml(label)}</span>`).join("");
+  const favRecord = normalizeFavoriteRecord({
+    id: `poi-${cleanText(entry.name)}-${cleanText(entry.address)}`.toLowerCase(),
+    name: entry.name,
+    address: [entry.district, entry.area, entry.address].filter(Boolean).join(" "),
+    location: entry.location,
+    type: entry.cuisine || "",
+    rankingLabels: entry.labels || [],
+    savedAt: new Date().toISOString()
+  });
+  const isFaved = isFavoriteId(favRecord.id);
   rankingInfoWindow.setContent(`
     <div class="ranking-info-window">
       <strong>${escapeHtml(entry.name)}</strong>
       <div class="ranking-info-tags">${labels}</div>
       <p>${cuisine} · ${price}</p>
       <p>${escapeHtml([entry.district, entry.area, entry.address].filter(Boolean).join(" · "))}</p>
+      <div class="ranking-info-actions">
+        <button class="ranking-fav-btn${isFaved ? " is-faved" : ""}" type="button" data-favorite="${escapeHtml(encodeURIComponent(JSON.stringify(favRecord)))}">
+          ${favoriteHeartIcon(isFaved)}
+          <span>${isFaved ? "已收藏" : "收藏"}</span>
+        </button>
+      </div>
     </div>
   `);
   rankingInfoWindow.open(map, position);
+  window.setTimeout(() => {
+    const favBtn = document.querySelector(".ranking-fav-btn");
+    if (!favBtn) return;
+    favBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const record = decodeFavoritePayload(favBtn.dataset.favorite);
+      if (!record) return;
+      const saved = toggleFavoriteRecord(record);
+      pulseFavoriteButton(favBtn);
+      rankingInfoWindow.close();
+      showToast(saved ? "已加入收藏" : "已取消收藏");
+    }, { once: true });
+  }, 50);
 }
 
 async function initMap() {
@@ -541,6 +640,10 @@ async function initMap() {
     });
 
     rankingInfoWindow = new window.AMap.InfoWindow({
+      offset: new window.AMap.Pixel(0, -24),
+      closeWhenClickMap: true
+    });
+    poiInfoWindow = new window.AMap.InfoWindow({
       offset: new window.AMap.Pixel(0, -24),
       closeWhenClickMap: true
     });
@@ -795,8 +898,7 @@ function renderNearbyMap(payload) {
         direction: "top"
       }
     });
-    originMarker.setMap(map);
-    overlays.push(originMarker);
+    addMapOverlay("base", originMarker);
 
     const circle = new window.AMap.Circle({
       center: origin,
@@ -808,8 +910,7 @@ function renderNearbyMap(payload) {
       fillColor: "#008f81",
       fillOpacity: 0.08
     });
-    circle.setMap(map);
-    overlays.push(circle);
+    addMapOverlay("walkRadius", circle);
   }
 
   pois.slice(0, 10).forEach((poi, index) => {
@@ -824,13 +925,15 @@ function renderNearbyMap(payload) {
         direction: "top"
       }
     });
-    marker.setMap(map);
-    overlays.push(marker);
+    marker.on("click", () => openPoiInfo(poi, point));
+    addMapOverlay("pois", marker);
   });
 
   state.mapBounds = bounds;
   fitMap();
   renderMapLegend();
+  renderLayerToggles();
+  applyLayerVisibility();
 }
 
 function renderNearbyEvidence(payload) {
@@ -916,7 +1019,35 @@ function renderContext() {
 
   if (contextTextEl) contextTextEl.textContent = contextText;
   if (bannerTextEl) bannerTextEl.textContent = bannerText;
-  if (els.searchHint) els.searchHint.textContent = `💡 提示：您可以试着输入“${currentArea} 附近有什么电影院？”`;
+  if (els.searchHint) {
+    els.searchHint.textContent = `💡 提示：您可以试着输入“${currentArea} 附近有什么值得去的地方？”`;
+  }
+}
+
+function setActiveView(view) {
+  state.activeView = view === "favorites" ? "favorites" : "chat";
+  applyActiveView();
+}
+
+function applyActiveView() {
+  const isFavorites = state.activeView === "favorites";
+  document.body.classList.toggle("view-favorites", isFavorites);
+  const tabs = [
+    { el: els.conversationRailTab, view: "chat", rail: true },
+    { el: els.favoritesRailTab, view: "favorites", rail: true },
+    { el: els.mobileConversationTab, view: "chat", rail: false },
+    { el: els.mobileFavoritesTab, view: "favorites", rail: false }
+  ];
+
+  tabs.forEach(({ el, view, rail }) => {
+    if (!el) return;
+    const active = state.activeView === view;
+    el.classList.toggle("is-active", active);
+    if (rail) el.classList.toggle("active", active);
+    el.setAttribute("aria-current", active ? "page" : "false");
+  });
+
+  els.favoritesPanel?.setAttribute("aria-hidden", isFavorites ? "false" : "true");
 }
 
 function updateChatMode() {
@@ -924,6 +1055,308 @@ function updateChatMode() {
   document.body.classList.toggle("has-messages", hasMessages);
   els.heroAskCard?.setAttribute("aria-hidden", hasMessages ? "true" : "false");
   els.followupInputBar?.setAttribute("aria-hidden", hasMessages ? "false" : "true");
+  applyActiveView();
+}
+
+function favoriteIdFromRecord(record) {
+  return `poi-${cleanText(record?.name)}-${cleanText(record?.address)}`.toLowerCase();
+}
+
+function normalizeFavoriteRecord(record) {
+  const rankingLabels = Array.isArray(record?.rankingLabels) ? record.rankingLabels.filter(Boolean).map(String) : [];
+  const location = Array.isArray(record?.location) ? pointToString(record.location) : cleanText(record?.location);
+  const normalized = {
+    id: cleanText(record?.id) || favoriteIdFromRecord(record),
+    name: cleanText(record?.name) || "地点",
+    address: cleanText(record?.address),
+    location,
+    type: cleanText(record?.type) || cleanText(record?.category),
+    distance: cleanText(record?.distance),
+    rankingLabels,
+    savedAt: cleanText(record?.savedAt) || new Date().toISOString()
+  };
+  return normalized;
+}
+
+function favoriteRecordFromPoi(poi) {
+  const address = cleanText([poi?.district, poi?.address].filter(Boolean).join(" "));
+  const location = Array.isArray(poi?.location) ? pointToString(poi.location) : cleanText(poi?.location);
+  const record = normalizeFavoriteRecord({
+    id: favoriteIdFromRecord({ name: poi?.name, address }),
+    name: poi?.name,
+    address,
+    location,
+    type: poi?.type || state.filters.category,
+    distance: poi?.distance,
+    rankingLabels: Array.isArray(poi?.rankingLabels) ? poi.rankingLabels : [],
+    savedAt: new Date().toISOString()
+  });
+  return record;
+}
+
+function isFavoriteId(id) {
+  return state.favorites.some((favorite) => favorite.id === id);
+}
+
+function dispatchFavoritesChanged() {
+  saveFavorites();
+  window.dispatchEvent(new CustomEvent("favorites-changed", { detail: { favorites: state.favorites } }));
+}
+
+function handleFavoritesChanged(event) {
+  const favorites = Array.isArray(event?.detail?.favorites) ? event.detail.favorites.map(normalizeFavoriteRecord) : state.favorites;
+  state.favorites = favorites;
+  renderFavoritesPanel();
+  syncFavoriteButtons();
+}
+
+function toggleFavoriteRecord(record) {
+  const normalized = normalizeFavoriteRecord(record);
+  const index = state.favorites.findIndex((favorite) => favorite.id === normalized.id);
+  if (index >= 0) {
+    state.favorites.splice(index, 1);
+    dispatchFavoritesChanged();
+    return false;
+  }
+  state.favorites.unshift(normalized);
+  dispatchFavoritesChanged();
+  return true;
+}
+
+function favoriteMetaLine(record) {
+  return [cleanText(record.address), formatDistance(record.distance), cleanText(record.type)].filter(Boolean).join(" · ");
+}
+
+function favoriteHeartIcon(isFaved) {
+  return `
+    <svg class="fav-heart-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 20.8 4.9 13.9a4.8 4.8 0 0 1 0-6.9 5 5 0 0 1 7 0l.1.1.1-.1a5 5 0 0 1 7 0 4.8 4.8 0 0 1 0 6.9Z" fill="${isFaved ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `;
+}
+
+function favoriteButtonMarkup(record) {
+  const id = cleanText(record?.id) || favoriteIdFromRecord(record);
+  const isFaved = isFavoriteId(id);
+  const payload = escapeHtml(encodeURIComponent(JSON.stringify(normalizeFavoriteRecord({ ...record, id }))));
+  return `
+    <button
+      class="fav-button${isFaved ? " is-faved" : ""}"
+      type="button"
+      aria-label="${isFaved ? "取消收藏" : "收藏地点"}"
+      data-poi-id="${escapeHtml(id)}"
+      data-favorite="${payload}"
+    >
+      ${favoriteHeartIcon(isFaved)}
+    </button>
+  `;
+}
+
+function renderFavoritesPanel() {
+  if (!els.favoritesList) return;
+  const count = state.favorites.length;
+  if (els.favoritesCount) els.favoritesCount.textContent = `${count} 个地点`;
+
+  if (!count) {
+    els.favoritesList.innerHTML = `
+      <div class="fav-empty">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 20.8 4.9 13.9a4.8 4.8 0 0 1 0-6.9 5 5 0 0 1 7 0l.1.1.1-.1a5 5 0 0 1 7 0 4.8 4.8 0 0 1 0 6.9Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <div>
+          <strong>还没有收藏的地点</strong>
+          <p>在搜索结果中点击❤️即可收藏</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  els.favoritesList.innerHTML = `
+    <div class="favorites-card-list">
+      ${state.favorites
+        .map(
+          (favorite, index) => `
+            <article class="place-card place-card--favorite is-clickable" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+              <div class="place-photo place-photo-rank">${index + 1}</div>
+              <div class="place-card-main">
+                <strong>${escapeHtml(favorite.name)}</strong>
+                <span class="place-inline-meta">${escapeHtml(favoriteMetaLine(favorite))}</span>
+                <div class="place-badges">${(favorite.rankingLabels || []).map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>
+              </div>
+              ${favoriteButtonMarkup(favorite)}
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderLayerToggles() {
+  const mapWrap = document.querySelector(".map-wrap");
+  if (!mapWrap) return;
+  mapWrap.querySelector(".layer-toggles")?.remove();
+
+  const container = document.createElement("div");
+  container.className = "layer-toggles";
+  container.innerHTML = `
+    <button class="layer-toggle ${state.layers.walkRadius ? "" : "is-hidden"}" type="button" data-layer="walkRadius">
+      ${state.layers.walkRadius ? "◎" : "○"} 步行范围
+    </button>
+    <button class="layer-toggle ${state.layers.pois ? "" : "is-hidden"}" type="button" data-layer="pois">
+      ${state.layers.pois ? "◎" : "○"} 美食/店铺
+    </button>
+    <button class="layer-toggle ${state.layers.rankings ? "" : "is-hidden"}" type="button" data-layer="rankings">
+      ${state.layers.rankings ? "◎" : "○"} 全部榜单
+    </button>
+  `;
+
+  container.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => toggleLayer(button.dataset.layer));
+  });
+
+  mapWrap.appendChild(container);
+}
+
+function toggleLayer(layerKey) {
+  if (!layerKey || !(layerKey in state.layers)) return;
+  state.layers[layerKey] = !state.layers[layerKey];
+  renderLayerToggles();
+  applyLayerVisibility();
+  fitMap();
+}
+
+function isLayerVisible(layerKey) {
+  if (layerKey === "walkRadius") return state.layers.walkRadius;
+  if (layerKey === "pois") return state.layers.pois;
+  if (layerKey === "rankings") return state.layers.rankings;
+  return true;
+}
+
+function addMapOverlay(layerKey, overlay) {
+  if (!overlay) return;
+  if (layerKey === "walkRadius") {
+    walkRadiusOverlays.push(overlay);
+  } else if (layerKey === "pois") {
+    poiOverlays.push(overlay);
+  } else if (layerKey === "rankings") {
+    rankingOverlays.push(overlay);
+  } else {
+    baseOverlays.push(overlay);
+  }
+  overlay.setMap(isLayerVisible(layerKey) ? map : null);
+}
+
+function removeOverlayReference(overlay) {
+  if (!overlay) return;
+  baseOverlays = baseOverlays.filter((item) => item !== overlay);
+  walkRadiusOverlays = walkRadiusOverlays.filter((item) => item !== overlay);
+  poiOverlays = poiOverlays.filter((item) => item !== overlay);
+  rankingOverlays = rankingOverlays.filter((item) => item !== overlay);
+}
+
+function visibleMapOverlays() {
+  return [
+    ...baseOverlays,
+    ...(state.layers.walkRadius ? walkRadiusOverlays : []),
+    ...(state.layers.pois ? poiOverlays : []),
+    ...(state.layers.rankings ? rankingOverlays : [])
+  ].filter(Boolean);
+}
+
+function applyLayerVisibility() {
+  if (!map) return;
+  walkRadiusOverlays.forEach((overlay) => overlay.setMap(state.layers.walkRadius ? map : null));
+  poiOverlays.forEach((overlay) => overlay.setMap(state.layers.pois ? map : null));
+  rankingOverlays.forEach((overlay) => overlay.setMap(state.layers.rankings ? map : null));
+}
+
+function decodeFavoritePayload(raw) {
+  if (!raw) return null;
+  try {
+    return normalizeFavoriteRecord(JSON.parse(decodeURIComponent(raw)));
+  } catch {
+    return null;
+  }
+}
+
+function syncFavoriteButtons() {
+  document.querySelectorAll(".fav-button").forEach((button) => {
+    const record = decodeFavoritePayload(button.dataset.favorite);
+    const fallbackId = cleanText(button.dataset.poiId);
+    const id = record?.id || fallbackId;
+    const isFaved = isFavoriteId(id);
+    button.classList.toggle("is-faved", isFaved);
+    button.setAttribute("aria-label", isFaved ? "取消收藏" : "收藏地点");
+    button.innerHTML = favoriteHeartIcon(isFaved);
+  });
+}
+
+function pulseFavoriteButton(button) {
+  if (!button) return;
+  button.classList.remove("is-popping");
+  button.offsetWidth;
+  button.classList.add("is-popping");
+  window.setTimeout(() => button.classList.remove("is-popping"), 240);
+}
+
+function clearFavoritePreview() {
+  if (!favoritePreviewOverlay) return;
+  try {
+    favoritePreviewOverlay.setMap?.(null);
+  } catch {
+    // ignore map cleanup failure
+  }
+  removeOverlayReference(favoritePreviewOverlay);
+  favoritePreviewOverlay = null;
+}
+
+function focusFavoriteOnMap(record) {
+  const point = parseLocation(record?.location);
+  if (!map || point.length !== 2 || !point.every(Number.isFinite)) {
+    showToast("这个收藏地点暂时没有可用坐标");
+    return;
+  }
+
+  clearFavoritePreview();
+  favoritePreviewOverlay = new window.AMap.Marker({
+    position: point,
+    title: record?.name || "收藏地点",
+    label: {
+      content: `<div class="map-label origin">${escapeHtml((record?.name || "收藏").slice(0, 2))}</div>`,
+      direction: "top"
+    }
+  });
+  addMapOverlay("base", favoritePreviewOverlay);
+  map.setZoomAndCenter(Math.max(Number(map.getZoom?.() || 15), 15), point);
+}
+
+function handlePlaceCardInteraction(event) {
+  const favoriteButton = event.target instanceof Element ? event.target.closest(".fav-button") : null;
+  if (favoriteButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const record = decodeFavoritePayload(favoriteButton.dataset.favorite);
+    if (!record) return;
+    const isSaved = toggleFavoriteRecord(record);
+    pulseFavoriteButton(favoriteButton);
+    showToast(isSaved ? "已加入收藏" : "已取消收藏");
+    return;
+  }
+
+  const card = event.target instanceof Element ? event.target.closest(".place-card.is-clickable") : null;
+  if (!card) return;
+  const record = normalizeFavoriteRecord({
+    id: card.dataset.poiId,
+    location: card.dataset.location,
+    name: card.querySelector("strong")?.textContent || "地点",
+    address: card.querySelector(".place-inline-meta")?.textContent || ""
+  });
+  if (state.activeView === "favorites") {
+    setActiveView("chat");
+  }
+  focusFavoriteOnMap(record);
 }
 
 function initVoiceInput() {
@@ -1176,6 +1609,7 @@ async function askAgent(question) {
 
 function appendMessage(role, content, options = {}) {
   if (!els.conversation) return document.createElement("article");
+  const shouldStick = isConversationNearBottom();
 
   const message = document.createElement("article");
   message.className = `message ${role === "user" ? "user" : "assistant"}`;
@@ -1208,7 +1642,7 @@ function appendMessage(role, content, options = {}) {
   message.append(avatar, body);
   els.conversation.appendChild(message);
   updateChatMode();
-  scrollConversationToBottom();
+  if (shouldStick || role === "user") scrollConversationToBottom(true);
   return message;
 }
 
@@ -1223,13 +1657,15 @@ function appendAnswer(payload, options = {}) {
 
   const cards = buildAnswerCards(payload);
   if (cards) message.querySelector(".message-body")?.insertAdjacentHTML("beforeend", cards);
+  hidePendingThinkingMessage();
   scrollConversationToBottom();
 }
 
 function buildAnswerCards(payload) {
   const pois = payload?.data?.pois || [];
   if (Array.isArray(pois) && pois.length) {
-    return `<div class="answer-list">${pois.slice(0, 4).map((poi) => placeCard(poi)).join("")}</div>`;
+    const limit = isMobileViewport() ? 2 : 4;
+    return `<div class="answer-list">${pois.slice(0, limit).map((poi) => placeCard(poi)).join("")}</div>`;
   }
 
   const matches = payload?.data?.matches || [];
@@ -1253,14 +1689,16 @@ function placeCard(poi) {
   const address = [poi?.district, poi?.address].filter(Boolean).join(" ");
   const distance = poi?.distance ? `${poi.distance}m` : "";
   const labels = poi?.rankingLabels?.length ? poi.rankingLabels : [state.filters.category].filter(Boolean);
+  const favorite = favoriteRecordFromPoi(poi);
   return `
-    <article class="place-card">
+    <article class="place-card is-clickable" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
       <div class="place-photo"></div>
       <div class="place-card-main">
         <strong>${escapeHtml(name)}</strong>
         <span class="place-inline-meta">${escapeHtml([address, distance].filter(Boolean).join(" · "))}</span>
         <div class="place-badges">${labels.map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>
       </div>
+      ${favoriteButtonMarkup({ ...favorite, rankingLabels: labels })}
     </article>
   `;
 }
@@ -1286,10 +1724,11 @@ async function streamAgentReply(path, body, thinkingElement) {
 
   const applyDelta = (text) => {
     if (!text) return;
+    const shouldStick = isConversationNearBottom();
     streamedText += text;
     const target = thinkingElement?.querySelector(".message-text");
     if (target) target.textContent = streamedText;
-    scrollConversationToBottom();
+    if (shouldStick) scrollConversationToBottom(true);
   };
 
   const handleEvent = (name, data) => {
@@ -1344,9 +1783,22 @@ async function streamAgentReply(path, body, thinkingElement) {
   return finalPayload;
 }
 
-function scrollConversationToBottom() {
+function isConversationNearBottom() {
   if (!els.conversation) return;
-  els.conversation.scrollTop = els.conversation.scrollHeight;
+  const threshold = 60;
+  return els.conversation.scrollTop + els.conversation.clientHeight >= els.conversation.scrollHeight - threshold;
+}
+
+function scrollConversationToBottom(force = false) {
+  if (!els.conversation) return;
+  const threshold = 60;
+  const isNearBottom = force || els.conversation.scrollTop + els.conversation.clientHeight >= els.conversation.scrollHeight - threshold;
+  if (isNearBottom) els.conversation.scrollTop = els.conversation.scrollHeight;
+}
+
+function hidePendingThinkingMessage() {
+  const pendingMsg = els.conversation?.querySelector(".message.is-pending");
+  if (pendingMsg) pendingMsg.style.display = "none";
 }
 
 function buildContextPayload() {
@@ -1413,8 +1865,12 @@ function renderAgentMap(payload) {
         direction: "top"
       }
     });
-    marker.setMap(map);
-    overlays.push(marker);
+    if (item.role === "origin" || item.role === "destination") {
+      addMapOverlay("base", marker);
+    } else {
+      marker.on("click", () => openPoiInfo(item, point));
+      addMapOverlay("pois", marker);
+    }
   });
 
   if (payload.map.radius && payload.map.center) {
@@ -1428,8 +1884,7 @@ function renderAgentMap(payload) {
       fillColor: "#008f81",
       fillOpacity: 0.08
     });
-    circle.setMap(map);
-    overlays.push(circle);
+    addMapOverlay("walkRadius", circle);
   }
 
   if (payload.map.route) {
@@ -1447,14 +1902,15 @@ function renderAgentMap(payload) {
       lineCap: "round",
       showDir: true
     });
-    line.setMap(map);
-    overlays.push(line);
+    addMapOverlay("base", line);
     routePath.forEach((point) => bounds.push(point));
   }
 
   state.mapBounds = bounds;
   fitMap();
   renderMapLegend();
+  renderLayerToggles();
+  applyLayerVisibility();
 }
 
 function renderAgentEvidence(payload) {
@@ -1905,6 +2361,48 @@ function showToast(message) {
   }, 2200);
 }
 
+function showFirstVisitGuide() {
+  if (localStorage.getItem(GUIDE_STORAGE_KEY) || !els.heroAskCard) return;
+  els.heroAskCard.querySelector(".first-visit-guide")?.remove();
+
+  const guide = document.createElement("div");
+  guide.className = "first-visit-guide";
+  guide.innerHTML = `
+    <div class="guide-content">
+      <span class="guide-icon">👋</span>
+      <div>
+        <strong>试试这样问：</strong>
+        <p>“附近有什么必吃榜的餐厅”<br>“步行10分钟内的咖啡馆”<br>“上海市中心有什么值得去的地方”</p>
+      </div>
+      <button class="guide-dismiss" type="button" aria-label="关闭提示">✕</button>
+    </div>
+  `;
+
+  const dismiss = () => {
+    if (!guide.isConnected) return;
+    guide.classList.add("is-dismissing");
+    window.clearTimeout(guideDismissTimer);
+    localStorage.setItem(GUIDE_STORAGE_KEY, "1");
+    window.setTimeout(() => guide.remove(), 400);
+    document.removeEventListener("click", handleUserInteraction, true);
+    document.removeEventListener("keydown", handleUserInteraction, true);
+  };
+
+  const handleUserInteraction = (event) => {
+    if (event?.target instanceof Element && event.target.closest(".guide-dismiss")) {
+      dismiss();
+      return;
+    }
+    dismiss();
+  };
+
+  guide.querySelector(".guide-dismiss")?.addEventListener("click", dismiss);
+  document.addEventListener("click", handleUserInteraction, true);
+  document.addEventListener("keydown", handleUserInteraction, true);
+  guideDismissTimer = window.setTimeout(dismiss, 6000);
+  els.heroAskCard.prepend(guide);
+}
+
 function renderMapLegend() {
   const mapWrap = document.querySelector(".map-wrap");
   if (!mapWrap) return;
@@ -1916,6 +2414,18 @@ function renderMapLegend() {
     <span><i class="legend-icon legend-icon-radius" aria-hidden="true">${legendRadiusSvg()}</i>步行范围</span>
   `;
   mapWrap.appendChild(legend);
+}
+
+function openPoiInfo(poi, point) {
+  if (!poiInfoWindow || !map) return;
+  poiInfoWindow.setContent(`
+    <div class="poi-info-window">
+      <strong>${escapeHtml(poi?.name || "地点")}</strong>
+      <p>${escapeHtml([poi?.district, poi?.area, poi?.address].filter(Boolean).join(" · "))}</p>
+      <p>${poi?.distance ? `距离约 ${escapeHtml(formatDistance(poi.distance))}` : ""}</p>
+    </div>
+  `);
+  poiInfoWindow.open(map, point);
 }
 
 function legendPinSvg() {
@@ -1940,14 +2450,20 @@ function renderEvidenceNotice(message) {
 }
 
 function clearMap() {
-  overlays.forEach((overlay) => overlay.setMap(null));
-  overlays = [];
-  clearRankingOverlays();
+  [...baseOverlays, ...walkRadiusOverlays, ...poiOverlays, ...rankingOverlays].forEach((overlay) => overlay.setMap?.(null));
+  baseOverlays = [];
+  walkRadiusOverlays = [];
+  poiOverlays = [];
+  rankingOverlays = [];
+  favoritePreviewOverlay = null;
+  poiInfoWindow?.close?.();
+  rankingInfoWindow?.close?.();
 }
 
 function clearRankingOverlays() {
-  rankingOverlays.forEach((overlay) => overlay.setMap(null));
+  rankingOverlays.forEach((overlay) => overlay.setMap?.(null));
   rankingOverlays = [];
+  rankingInfoWindow?.close?.();
 }
 
 function fitMap() {
@@ -1956,7 +2472,9 @@ function fitMap() {
     map.setZoomAndCenter(15, state.mapBounds[0]);
     return;
   }
-  map.setFitView([...overlays, ...rankingOverlays], false, [80, 80, 80, 80], 16);
+  const overlays = visibleMapOverlays();
+  if (!overlays.length) return;
+  map.setFitView(overlays, false, [80, 80, 80, 80], 16);
 }
 
 function apiGet(path) {

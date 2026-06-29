@@ -1,12 +1,15 @@
 # Codex Project Context
 
-Last updated: 2026-06-27
+Last updated: 2026-06-29
 
 This file is the main handoff note for new Codex chats in this workspace. When a new chat starts, read this file first before changing code.
 
 ## Project
 
-- Workspace: `D:\Users\Administrator\Documents\高德地图API`
+- Workspace: current home Mac path is `/Users/urcute/Desktop/mac 高德api项目/amap-ai-map-assistant`
+- Older company-computer path may still be the previous Windows workspace. Do not assume path equality across machines; rely on the repo name and the two handoff docs.
+- GitHub repo: `https://github.com/s1320654147-sketch/amap-ai-map-assistant.git`
+- Active collaboration branch: `codex/weekend-handoff-20260627`
 - Product: a web AI map assistant using DeepSeek for language understanding and AMap/Gaode for real POI, route, nearby, and ranking data.
 - Core goal: avoid AI hallucinated places by forcing factual location data to come from AMap/Gaode, then let DeepSeek explain and summarize results.
 - Current default local URL: `http://localhost:5177/`
@@ -20,6 +23,7 @@ This file is the main handoff note for new Codex chats in this workspace. When a
 - Keep the main local port fixed at `5177`. Port `5188` was only a temporary test port in earlier work.
 - The user is non-technical and prefers direct background edits plus concise summaries.
 - Weekend cross-device work uses `codex/weekend-handoff-20260627`. Do not merge it to `main` or deploy Render without explicit user approval.
+- Render had previously been switched by the user to follow `codex/weekend-handoff-20260627`, so a push to that branch may also trigger Render auto-deploy. Treat branch pushes as potentially deployment-affecting.
 - For a new computer or new Codex chat, read both `CODEX_CONTEXT.md` and `WEEKEND_HANDOFF.md`.
 
 ## Important Source Threads Read
@@ -45,15 +49,25 @@ Main runtime files:
 - `data/lists.json`: imported ranking list data.
 - `data/lists.resolved.json`: ranking entries resolved to coordinates/cache.
 - `public/assets/`: AMap, DeepSeek, ranking logos.
+- `UX_FIX_TASKS.md`: earlier UX task note provided by the user.
+- `UX_FIX_TASKS_v2.md`: latest UX task source for the recent mobile/layout iteration.
 - `.env`: local secrets and runtime config. Do not expose.
 - `render.yaml`: Render deployment config.
 - `README.md`: basic setup/deployment notes.
 
-Current known git state before this context update:
+Current known git state before the 2026-06-29 checkpoint commit:
 
-- Modified tracked files: `server.js`, `public/app.js`, `public/index.html`, `public/mobile.html`, `public/styles.css`.
-- Untracked source assets/data: `images.jpg`, `images.png`, `37271e0c2fb0db07fd869b8aaf8b0fdc.jpg`, and three Shanghai ranking CSV files.
-- Do not revert or delete these without asking. They come from previous project work.
+- `git branch --show-current` => `codex/weekend-handoff-20260627`
+- `git status --short` showed:
+  - `M public/app.js`
+  - `M public/index.html`
+  - `M public/styles.css`
+  - `?? .codex/`
+  - `?? UX_FIX_TASKS.md`
+  - `?? UX_FIX_TASKS_v2.md`
+  - `?? package-lock.json`
+- `.codex/` is local-only helper state and should not be pushed unless explicitly needed.
+- `UX_FIX_TASKS.md` and `UX_FIX_TASKS_v2.md` are user task briefs and should be preserved in the repo for cross-device continuation.
 
 ## Runtime And Environment
 
@@ -352,18 +366,80 @@ Do not conclude natural-language parsing failed until the actual request body en
 
 ## Current Working Baseline
 
-The latest known local baseline after the most recent thread:
+The latest known local baseline after the 2026-06-29 night checkpoint:
 
-- `node --check server.js` passed.
-- `node --check public/app.js` passed.
-- `/api/agent/stream` with the 人民广场/本帮菜 question no longer returns error.
-- It returned stable `nearby`, `radius: 1200`, `keywords: 本帮菜`, and many `allPois` entries.
-- Service was restarted on `http://127.0.0.1:5177`.
-- AI Discovery was browser-tested locally: click -> random prompt -> automatic submit -> map/evidence response.
-- Current local-only files before the weekend handoff commit: `public/app.js` and `public/styles.css`.
-- Cross-device instructions live in `WEEKEND_HANDOFF.md`; home setup helper is `scripts/setup-home.ps1`.
+- `node --check server.js` passed on 2026-06-29.
+- `node --check public/app.js` passed on 2026-06-29.
+- Main local service still runs at `http://localhost:5177/`.
+- `/api/agent/stream` core nearby flow remains fixed for the 人民广场/本帮菜 regression case.
+- Mobile layout was reworked around `--app-height`, fluid `clamp()` sizing, and `dvh`-style viewport protection so the bottom nav / input area should no longer be cut off by WeChat/Safari browser chrome.
+- Mobile map + results layout now favors readable chat/results when `body.has-messages`, while keeping a larger map when there are no messages yet.
+- Mobile voice input now supports:
+  - desktop/web click-to-start behavior retained
+  - mobile long-press start
+  - upward swipe to cancel
+- Favorites system is now part of the active UI:
+  - left rail + mobile bottom tab can switch to favorites view
+  - POI/ranking cards and ranking info windows can add/remove favorites
+  - favorites are stored in localStorage
+- Map interaction layer now includes:
+  - restored legend
+  - independent toggles for walk radius / POIs / rankings
+  - `全部榜单` pill can toggle from all -> none
+  - POI markers can open simple info windows
+- Prompt/input area updates completed in this checkpoint:
+  - AI inspiration entry moved to the left AI area
+  - mic icon switched from emoji to SVG
+  - mobile prompt chips forced into single-line horizontal scrolling
+  - first-visit guide banner added
+- Desktop left panel width was reduced from `420px` to `380px`.
+- Cross-device continuation docs live in `WEEKEND_HANDOFF.md`.
 
-Because files are currently modified in the working tree, re-verify before making new feature changes.
+Because files may continue changing across two computers, always re-run git/Node checks before a new editing session.
+
+## 2026-06-29 Night Checkpoint
+
+This checkpoint is the latest durable handoff after the mobile UX and continuity work completed on the home Mac.
+
+### Files Changed In This Checkpoint
+
+- `public/app.js`
+- `public/index.html`
+- `public/styles.css`
+- `CODEX_CONTEXT.md`
+- `WEEKEND_HANDOFF.md`
+- `UX_FIX_TASKS.md`
+- `UX_FIX_TASKS_v2.md`
+- `package-lock.json` (if committed, preserve it for dependency consistency)
+
+### Features Completed In This Checkpoint
+
+- Mobile viewport-safe layout hardening for H5/WeChat/Safari-style browser chrome.
+- Fluid mobile spacing using `clamp()` and stronger flex shrink rules.
+- Mobile large voice CTA and long-press voice interaction path.
+- Map-first mobile reading pattern with drawer-style results behavior kept in the current architecture.
+- Favorites view and favorite-state synchronization across cards and map info windows.
+- Map legend restoration and layer-toggle mechanism.
+- Ranking card / ranking info favorite action.
+- POI marker click info window.
+- Prompt-chip cleanup and suggestion wording updates.
+- First-visit guidance card in the ask area.
+
+### Recommended Next Steps For The Next Computer/Next Chat
+
+1. Pull the latest `codex/weekend-handoff-20260627`.
+2. Read `CODEX_CONTEXT.md` and `WEEKEND_HANDOFF.md`.
+3. Re-run:
+   - `git status`
+   - `git branch --show-current`
+   - `node --check server.js`
+   - `node --check public/app.js`
+4. Start the app on `5177` and manually regression-test:
+   - mobile long-press voice + upward cancel
+   - favorites add/remove + favorites tab
+   - layer toggles
+   - nearby / route / travel / search / cluster basic flows
+5. If the next task continues the UI plan, use `UX_FIX_TASKS_v2.md` as the latest design task source.
 
 ## Deployment Notes
 
@@ -382,7 +458,7 @@ Recommended process:
 1. Develop and test on localhost.
 2. Batch normal UI improvements instead of deploying every tiny change.
 3. Deploy urgent bugs immediately only with explicit user approval.
-4. GitHub push triggers Render deploy when approved.
+4. GitHub push may trigger Render deploy if Render is still tracking `codex/weekend-handoff-20260627`.
 
 ## Suggested Next Steps For A New Chat
 
@@ -390,6 +466,7 @@ Recommended process:
 2. Run:
    ```powershell
    git status --short
+   git branch --show-current
    node --check server.js
    node --check public/app.js
    ```
@@ -397,7 +474,7 @@ Recommended process:
 4. If changing backend behavior, restart Node before validating.
 5. If changing front-end JS/CSS, bump resource version in `public/index.html` and `public/mobile.html` if the browser may cache old assets.
 6. Preserve the user rule: no GitHub/Render deployment without explicit consent.
-7. For weekend work, stay on `codex/weekend-handoff-20260627`.
+7. For weekend and cross-computer relay work, stay on `codex/weekend-handoff-20260627` until the user explicitly decides to merge or switch branches.
 
 ## Quick Test Prompts
 

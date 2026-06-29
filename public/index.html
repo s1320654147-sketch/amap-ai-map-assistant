@@ -11,9 +11,9 @@
       <section class="left-side-panel chat-column">
         <nav class="rail" aria-label="主导航">
           <div class="rail-logo">AI</div>
-          <button class="rail-item active" type="button"><span>⌁</span><em>对话</em></button>
+          <button class="rail-item active is-active" id="conversationRailTab" type="button" data-view="chat"><span>⌁</span><em>对话</em></button>
           <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>◌</span><em>搜索</em></button>
-          <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>☆</span><em>收藏</em></button>
+          <button class="rail-item" id="favoritesRailTab" type="button" data-view="favorites"><span>☆</span><em>收藏</em></button>
           <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>▣</span><em>分析</em></button>
           <button class="rail-item is-disabled" type="button" disabled title="即将上线"><span>⚙</span><em>设置</em></button>
           <div class="rail-spacer"></div>
@@ -78,7 +78,7 @@
               <span>点击开始语音</span>
             </button>
             <div class="quick-prompts" id="quickPrompts"></div>
-            <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么电影院？”</div>
+            <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么值得去的地方？”</div>
           </section>
 
           <section class="chat-stream">
@@ -148,10 +148,21 @@
           <button class="more-button" type="button">查看更多</button>
         </section>
       </section>
+
+      <section class="favorites-panel" id="favoritesPanel" aria-hidden="true">
+        <header class="favorites-panel-header">
+          <div>
+            <p class="favorites-panel-eyebrow">Saved Places</p>
+            <h2>我的收藏</h2>
+          </div>
+          <span class="favorites-panel-count" id="favoritesCount">0 个地点</span>
+        </header>
+        <div class="favorites-panel-body" id="favoritesList"></div>
+      </section>
     </main>
 
     <nav class="mobile-bottom-nav" aria-label="移动端主导航">
-      <button class="mobile-nav-item is-active" type="button" aria-current="page">
+      <button class="mobile-nav-item is-active" id="mobileConversationTab" type="button" aria-current="page" data-view="chat">
         <svg class="mobile-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M7 8h10" />
           <path d="M7 12h6" />
@@ -161,7 +172,7 @@
         </svg>
         <span>对话</span>
       </button>
-      <button class="mobile-nav-item" type="button" title="收藏">
+      <button class="mobile-nav-item" id="mobileFavoritesTab" type="button" title="收藏" data-view="favorites">
         <svg class="mobile-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="m12 4 2.3 4.7 5.2.8-3.8 3.7.9 5.1L12 16l-4.6 2.3.9-5.1-3.8-3.7 5.2-.8Z" />
         </svg>
