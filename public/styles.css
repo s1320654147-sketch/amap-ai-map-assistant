@@ -1014,6 +1014,10 @@ button {
   backdrop-filter: blur(6px);
 }
 
+.note-sheet-backdrop[hidden] {
+  display: none !important;
+}
+
 .note-sheet-panel {
   width: min(100%, 520px);
   margin: 0 auto;
@@ -1021,6 +1025,7 @@ button {
   background: #ffffff;
   padding: 12px 18px calc(18px + env(safe-area-inset-bottom, 0px));
   box-shadow: 0 -18px 48px -28px rgba(15, 23, 42, 0.45);
+  pointer-events: auto;
 }
 
 .note-sheet-grabber {
@@ -1062,6 +1067,7 @@ button {
   background: #f1f5f9;
   color: #64748b;
   font-size: 20px;
+  touch-action: manipulation;
 }
 
 .note-sheet-place {
@@ -1105,6 +1111,7 @@ button {
   padding: 0 16px;
   font-size: 14px;
   font-weight: 700;
+  touch-action: manipulation;
 }
 
 .note-sheet-skip {

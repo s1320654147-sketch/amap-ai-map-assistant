@@ -218,9 +218,21 @@ function bindEvents() {
   els.searchPanelResults?.addEventListener("click", handlePlaceCardInteraction);
   els.searchPanelForm?.addEventListener("submit", handleSearchPanelSubmit);
   els.searchPanelInput?.addEventListener("input", handleSearchPanelInput);
-  els.favoriteNoteSave?.addEventListener("click", () => commitFavoriteDraft(true));
-  els.favoriteNoteSkip?.addEventListener("click", () => commitFavoriteDraft(false));
-  els.favoriteNoteCancel?.addEventListener("click", closeFavoriteNoteSheet);
+  els.favoriteNoteSave?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    commitFavoriteDraft(true);
+  });
+  els.favoriteNoteSkip?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    commitFavoriteDraft(false);
+  });
+  els.favoriteNoteCancel?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeFavoriteNoteSheet();
+  });
   els.favoriteNoteSheet?.addEventListener("click", (event) => {
     if (event.target === els.favoriteNoteSheet) closeFavoriteNoteSheet();
   });
@@ -1531,6 +1543,7 @@ function openFavoriteNoteSheet(record) {
   }
   if (els.favoriteNoteSheet) {
     els.favoriteNoteSheet.hidden = false;
+    els.favoriteNoteSheet.setAttribute("aria-hidden", "false");
   }
   requestAnimationFrame(() => els.favoriteNoteInput?.focus());
 }
@@ -1539,6 +1552,7 @@ function closeFavoriteNoteSheet() {
   state.favoriteDraft = null;
   if (els.favoriteNoteSheet) {
     els.favoriteNoteSheet.hidden = true;
+    els.favoriteNoteSheet.setAttribute("aria-hidden", "true");
   }
   if (els.favoriteNoteInput) {
     els.favoriteNoteInput.value = "";
@@ -1546,7 +1560,10 @@ function closeFavoriteNoteSheet() {
 }
 
 function commitFavoriteDraft(withNote) {
-  if (!state.favoriteDraft) return;
+  if (!state.favoriteDraft) {
+    closeFavoriteNoteSheet();
+    return;
+  }
   const note = withNote ? cleanText(els.favoriteNoteInput?.value) : "";
   saveFavoriteRecord({ ...state.favoriteDraft, savedSource: state.activeView === "search" ? "搜索收藏" : "对话收藏" }, note);
   closeFavoriteNoteSheet();
