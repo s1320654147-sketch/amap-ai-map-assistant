@@ -329,19 +329,23 @@ function syncViewportHeight() {
     activeElement instanceof HTMLElement &&
       (activeElement.matches("input, textarea") || activeElement.isContentEditable)
   );
-  const keyboardOpen = isMobileViewport() && hasTextFocus && layoutHeight - visualHeight > 120;
-
-  if (!keyboardOpen || !state.viewport.stableHeight) {
-    state.viewport.stableHeight = layoutHeight;
+  if (!hasTextFocus) {
+    state.viewport.stableHeight = Math.max(layoutHeight, visualHeight);
+  } else if (!state.viewport.stableHeight) {
+    state.viewport.stableHeight = Math.max(layoutHeight, visualHeight);
   }
+
+  const stableHeight = Math.max(state.viewport.stableHeight || 0, layoutHeight);
+  const keyboardOpen = isMobileViewport() && hasTextFocus && stableHeight - visualHeight > 100;
   state.viewport.keyboardOpen = keyboardOpen;
 
-  const appHeight = keyboardOpen ? state.viewport.stableHeight : layoutHeight;
-  const bottomGap = keyboardOpen ? 0 : Math.max(0, layoutHeight - visualHeight - visualOffsetTop);
+  const appHeight = isMobileViewport() ? visualHeight : layoutHeight;
+  const bottomGap = 0;
 
   document.body.classList.toggle("keyboard-open", keyboardOpen);
   document.documentElement.style.setProperty("--app-height", `${appHeight}px`);
   document.documentElement.style.setProperty("--viewport-bottom-gap", `${bottomGap}px`);
+  document.documentElement.style.setProperty("--viewport-offset-top", `${keyboardOpen ? visualOffsetTop : 0}px`);
   document.documentElement.style.setProperty("--keyboard-open", keyboardOpen ? "1" : "0");
 }
 

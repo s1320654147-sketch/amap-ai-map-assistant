@@ -2,6 +2,7 @@
   color-scheme: light;
   --app-height: 100vh;
   --viewport-bottom-gap: 0px;
+  --viewport-offset-top: 0px;
   --mobile-safe-bottom: env(safe-area-inset-bottom, 0px);
   --bg: #f8fafc;
   --panel: #ffffff;
@@ -2324,13 +2325,21 @@ body.mobile-page {
     padding:
       calc(var(--mobile-shell-pad) + env(safe-area-inset-top, 0px))
       var(--mobile-shell-pad)
-      calc(var(--mobile-dock-offset) + clamp(0.25rem, 0.8dvh, 0.5rem));
+      calc(var(--mobile-dock-offset) + 0.75rem);
     overflow: hidden;
   }
 
   body.keyboard-open .main-dashboard-layout {
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+    position: fixed;
+    top: var(--viewport-offset-top);
+    right: 0;
+    bottom: auto;
+    left: 0;
+    height: var(--app-height);
+    min-height: 0;
+    gap: clamp(0.375rem, 1dvh, 0.5rem);
+    padding: clamp(0.375rem, 1dvh, 0.5rem);
+    overflow: hidden;
   }
 
   .left-side-panel {
@@ -2366,6 +2375,8 @@ body.mobile-page {
   .header-inline-title {
     font-size: 12px;
     color: #9aa4b2;
+    margin-left: auto;
+    text-align: right;
   }
 
   .message-body p {
@@ -2626,6 +2637,7 @@ body.mobile-page {
     overflow-y: hidden;
     gap: clamp(0.375rem, 1dvh, 0.5rem);
     padding-top: clamp(0.625rem, 1.6dvh, 0.875rem);
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
   }
@@ -2943,6 +2955,60 @@ body.mobile-page {
     opacity: 0;
     pointer-events: none;
     transform: translateY(100%);
+  }
+
+  body.keyboard-open .chat-header,
+  body.keyboard-open .engine-powered-tag,
+  body.keyboard-open .mobile-voice-cta:not(.mobile-voice-cta-inline),
+  body.keyboard-open .quick-prompts,
+  body.keyboard-open .search-hint {
+    display: none !important;
+  }
+
+  body.keyboard-open .right-map-container {
+    flex: 1 1 auto;
+    min-height: 0;
+    border-radius: clamp(0.875rem, 2dvh, 1.125rem);
+  }
+
+  body.keyboard-open .map-wrap {
+    min-height: 0;
+    border-radius: inherit;
+  }
+
+  body.keyboard-open .evidence-table {
+    display: none;
+  }
+
+  body.keyboard-open .ask-card {
+    flex: 0 0 auto;
+    padding: 0.5rem 0.625rem;
+    border-radius: clamp(0.875rem, 2dvh, 1.125rem);
+    box-shadow: 0 -8px 24px -18px rgba(15, 23, 42, 0.45);
+  }
+
+  body.keyboard-open .ask-form textarea {
+    min-height: 48px;
+    max-height: 72px;
+    padding: 0.75rem 0.25rem;
+  }
+
+  body.keyboard-open.has-messages .right-map-container {
+    display: none;
+  }
+
+  body.keyboard-open .chat-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+
+  body.keyboard-open .chat-panel-header {
+    display: none;
+  }
+
+  body.keyboard-open .chat-stream {
+    min-height: 0;
   }
 
   .mobile-nav-item {
