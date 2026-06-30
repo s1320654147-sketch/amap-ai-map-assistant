@@ -113,6 +113,10 @@ const state = {
   favoriteDraft: null,
   favorites: [],
   isAsking: false,
+  viewport: {
+    stableHeight: 0,
+    keyboardOpen: false
+  },
   voice: {
     supported: false,
     isListening: false,
@@ -164,6 +168,45 @@ const discoveryPrompts = [
   "推荐附近步行范围内，当地人评价极高、排队也要吃的隐藏市井小吃",
   "附近有什么适合下午办公、有插座且咖啡品质不错的安静咖啡馆？",
   "推荐一家适合周末晚上约会、审美在线的情调意式餐厅或小酒馆"
+];
+
+const searchIntentCities = [
+  "义乌市",
+  "义乌",
+  "金华市",
+  "金华",
+  "上海市",
+  "上海",
+  "北京市",
+  "北京",
+  "广州市",
+  "广州",
+  "深圳市",
+  "深圳",
+  "杭州市",
+  "杭州",
+  "南京市",
+  "南京",
+  "苏州市",
+  "苏州",
+  "成都市",
+  "成都",
+  "重庆市",
+  "重庆",
+  "武汉市",
+  "武汉",
+  "西安市",
+  "西安",
+  "泉州市",
+  "泉州",
+  "厦门市",
+  "厦门",
+  "福州市",
+  "福州",
+  "宁波市",
+  "宁波",
+  "温州市",
+  "温州"
 ];
 
 init();
@@ -249,6 +292,8 @@ function bindEvents() {
   window.addEventListener("orientationchange", handleViewportChange);
   window.visualViewport?.addEventListener("resize", handleViewportChange);
   window.visualViewport?.addEventListener("scroll", handleViewportChange);
+  document.addEventListener("focusin", () => window.setTimeout(handleViewportChange, 24), true);
+  document.addEventListener("focusout", () => window.setTimeout(handleViewportChange, 180), true);
   syncDraftState();
   syncEvidenceDrawerState();
   setAskingState(false);
@@ -273,11 +318,31 @@ function saveFavorites() {
 }
 
 function syncViewportHeight() {
-  const viewportHeight = Math.round(
-    window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+  const layoutHeight = Math.round(window.innerHeight || document.documentElement.clientHeight || 0);
+  if (!layoutHeight) return;
+
+  const visualViewport = window.visualViewport;
+  const visualHeight = Math.round(visualViewport?.height || layoutHeight);
+  const visualOffsetTop = Math.round(visualViewport?.offsetTop || 0);
+  const activeElement = document.activeElement;
+  const hasTextFocus = Boolean(
+    activeElement instanceof HTMLElement &&
+      (activeElement.matches("input, textarea") || activeElement.isContentEditable)
   );
-  if (!viewportHeight) return;
-  document.documentElement.style.setProperty("--app-height", `${viewportHeight}px`);
+  const keyboardOpen = isMobileViewport() && hasTextFocus && layoutHeight - visualHeight > 120;
+
+  if (!keyboardOpen || !state.viewport.stableHeight) {
+    state.viewport.stableHeight = layoutHeight;
+  }
+  state.viewport.keyboardOpen = keyboardOpen;
+
+  const appHeight = keyboardOpen ? state.viewport.stableHeight : layoutHeight;
+  const bottomGap = keyboardOpen ? 0 : Math.max(0, layoutHeight - visualHeight - visualOffsetTop);
+
+  document.body.classList.toggle("keyboard-open", keyboardOpen);
+  document.documentElement.style.setProperty("--app-height", `${appHeight}px`);
+  document.documentElement.style.setProperty("--viewport-bottom-gap", `${bottomGap}px`);
+  document.documentElement.style.setProperty("--keyboard-open", keyboardOpen ? "1" : "0");
 }
 
 function restoreLocation() {
@@ -1298,14 +1363,15 @@ function renderSearchPanel() {
   if (!els.searchPanelResults) return;
   const query = cleanText(state.search.query);
   const results = Array.isArray(state.search.results) ? state.search.results : [];
+  const scope = describeSearchPanelScope(query);
   if (els.searchPanelInput && els.searchPanelInput.value !== state.search.query) {
     els.searchPanelInput.value = state.search.query;
   }
 
   if (els.searchResultCount) {
-    if (state.search.loading) els.searchResultCount.textContent = "正在调用高德搜索...";
+    if (state.search.loading) els.searchResultCount.textContent = `正在调用高德搜索 · ${scope}`;
     else if (!query) els.searchResultCount.textContent = "输入关键词开始搜索";
-    else els.searchResultCount.textContent = `高德返回 ${results.length} 个结果`;
+    else els.searchResultCount.textContent = `${scope} · 高德返回 ${results.length} 个结果`;
   }
 
   if (!query) {
@@ -1317,7 +1383,7 @@ function renderSearchPanel() {
         </svg>
         <div>
           <strong>搜索一个具体地点</strong>
-          <p>例如：上海环贸停车场、某某大厦、便宜停车场</p>
+          <p>默认全国范围搜索；例如：上海环贸停车场、静安寺、便宜停车场</p>
         </div>
       </div>
     `;
@@ -1390,13 +1456,16 @@ function handleSearchPanelSubmit(event) {
 async function runSearchPanelQuery(rawQuery, options = {}) {
   const query = cleanText(rawQuery);
   if (!query) return;
+  const searchIntent = resolveSearchPanelIntent(query);
   const requestId = state.search.lastRequestId + 1;
   state.search.lastRequestId = requestId;
   state.search.query = query;
   state.search.loading = true;
   renderSearchPanel();
   try {
-    const payload = await apiGet(`/api/search?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(state.filters.city || state.location.city || "")}`);
+    const payload = await apiGet(
+      `/api/search?keywords=${encodeURIComponent(searchIntent.keywords)}&city=${encodeURIComponent(searchIntent.city)}`
+    );
     if (requestId !== state.search.lastRequestId) return;
     state.search.results = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []).slice(0, 20);
     state.search.loading = false;
@@ -1412,6 +1481,27 @@ async function runSearchPanelQuery(rawQuery, options = {}) {
     renderSearchPanel();
     showToast(error instanceof Error ? error.message : "搜索失败");
   }
+}
+
+function resolveSearchPanelIntent(rawQuery) {
+  const query = cleanText(rawQuery);
+  if (!query) return { city: "", keywords: "", scopeLabel: "全国搜索" };
+
+  const matchedCity = searchIntentCities.find((cityName) => query.includes(cityName)) || "";
+  const normalizedCity = matchedCity ? normalizeCityName(matchedCity.replace(/市$/, "")) : "";
+  const strippedKeywords = matchedCity
+    ? cleanText(query.replace(matchedCity, " ").replace(/\s+/g, " "))
+    : query;
+
+  return {
+    city: normalizedCity,
+    keywords: strippedKeywords || query,
+    scopeLabel: normalizedCity ? `${normalizedCity} 内搜索` : "全国搜索"
+  };
+}
+
+function describeSearchPanelScope(rawQuery) {
+  return resolveSearchPanelIntent(rawQuery).scopeLabel;
 }
 
 function renderLayerToggles() {
@@ -2600,7 +2690,8 @@ function startVoiceRecognition(targetKey) {
 
   state.voice.targetKey = targetKey;
   state.voice.baseText = input.value || "";
-  if (!(isMobileViewport() && state.isVoiceMode && targetKey === "inlineQuestion")) {
+  const shouldAvoidMobileFocus = isMobileViewport() && (targetKey === "questionInput" || targetKey === "inlineQuestion");
+  if (!(shouldAvoidMobileFocus || (isMobileViewport() && state.isVoiceMode && targetKey === "inlineQuestion"))) {
     input.focus();
   }
   try {

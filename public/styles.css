@@ -1,6 +1,8 @@
 :root {
   color-scheme: light;
   --app-height: 100vh;
+  --viewport-bottom-gap: 0px;
+  --mobile-safe-bottom: env(safe-area-inset-bottom, 0px);
   --bg: #f8fafc;
   --panel: #ffffff;
   --text: #1e293b;
@@ -2300,7 +2302,8 @@ body.mobile-page {
     --mobile-map-min: clamp(14rem, 45dvh, 30rem);
     --mobile-sheet-max: clamp(12.5rem, 35dvh, 22rem);
     --mobile-nav-height: clamp(3.5rem, 6.4dvh, 4rem);
-    --mobile-dock-offset: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+    --mobile-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--viewport-bottom-gap));
+    --mobile-dock-offset: calc(var(--mobile-nav-height) + var(--mobile-safe-bottom));
   }
 
   html,
@@ -2323,6 +2326,11 @@ body.mobile-page {
       var(--mobile-shell-pad)
       calc(var(--mobile-dock-offset) + clamp(0.25rem, 0.8dvh, 0.5rem));
     overflow: hidden;
+  }
+
+  body.keyboard-open .main-dashboard-layout {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .left-side-panel {
@@ -2531,6 +2539,11 @@ body.mobile-page {
     max-height: none;
     margin-top: 0;
     padding: 0 var(--mobile-inline-pad);
+  }
+
+  .conversation {
+    padding-bottom: calc(var(--mobile-dock-offset) + clamp(0.75rem, 1.8dvh, 1rem));
+    scroll-padding-bottom: calc(var(--mobile-dock-offset) + clamp(0.75rem, 1.8dvh, 1rem));
   }
 
   body.has-messages .chat-stream {
@@ -2910,8 +2923,8 @@ body.mobile-page {
     right: 0;
     bottom: 0;
     z-index: 50;
-    height: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    height: calc(var(--mobile-nav-height) + var(--mobile-safe-bottom));
+    padding-bottom: var(--mobile-safe-bottom);
     display: block;
     background: rgba(255, 255, 255, 0.98);
     border-top: 1px solid rgba(226, 232, 240, 0.95);
@@ -2923,6 +2936,13 @@ body.mobile-page {
     display: flex;
     justify-content: space-around;
     align-items: center;
+    transition: transform 180ms ease, opacity 180ms ease;
+  }
+
+  body.keyboard-open .mobile-bottom-nav {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(100%);
   }
 
   .mobile-nav-item {
