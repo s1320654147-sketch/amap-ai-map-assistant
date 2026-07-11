@@ -81,11 +81,23 @@ const state = {
     walkMinutes: FILTERS.defaultWalkMinutes,
     category: FILTERS.defaultCategory
   },
-  history: [],
-  summary: "",
+  chat: {
+    history: [],
+    summary: "",
+    isAsking: false,
+    isCollapsed: false
+  },
+  map: {
+    bounds: [],
+    center: null,
+    zoom: 14,
+    selectedPlaceId: "",
+    activeInfoWindow: "",
+    chatDrawerCollapsed: false,
+    evidenceDrawerExpanded: false
+  },
   nearbyRequestId: 0,
   manualPickGuardAt: 0,
-  mapBounds: [],
   rankings: {
     city: "上海",
     markers: [],
@@ -103,7 +115,6 @@ const state = {
   evidenceExpanded: false,
   mobileDrawerExpanded: false,
   isVoiceMode: false,
-  isChatCollapsed: false,
   search: {
     query: "",
     results: [],
@@ -112,7 +123,6 @@ const state = {
   },
   favoriteDraft: null,
   favorites: [],
-  isAsking: false,
   viewport: {
     stableHeight: 0,
     keyboardOpen: false
@@ -133,14 +143,22 @@ const state = {
 };
 
 let map = null;
-let baseOverlays = [];
-let walkRadiusOverlays = [];
-let poiOverlays = [];
-let rankingOverlays = [];
-let favoriteStarOverlays = [];
-let rankingInfoWindow = null;
-let favoritePreviewOverlay = null;
-let poiInfoWindow = null;
+const mapRuntime = {
+  overlays: {
+    base: [],
+    walkRadius: [],
+    pois: [],
+    rankings: [],
+    favorites: []
+  },
+  infoWindows: {
+    ranking: null,
+    poi: null
+  },
+  favoritePreview: null,
+  resizeFrame: 0,
+  resizeTimer: 0
+};
 let guideDismissTimer = 0;
 let searchDebounceTimer = 0;
 
@@ -259,6 +277,9 @@ function bindEvents() {
   els.conversation?.addEventListener("click", handlePlaceCardInteraction);
   els.favoritesList?.addEventListener("click", handlePlaceCardInteraction);
   els.searchPanelResults?.addEventListener("click", handlePlaceCardInteraction);
+  els.conversation?.addEventListener("keydown", handlePlaceCardKeydown);
+  els.favoritesList?.addEventListener("keydown", handlePlaceCardKeydown);
+  els.searchPanelResults?.addEventListener("keydown", handlePlaceCardKeydown);
   els.searchPanelForm?.addEventListener("submit", handleSearchPanelSubmit);
   els.searchPanelInput?.addEventListener("input", handleSearchPanelInput);
   els.favoriteNoteSave?.addEventListener("click", (event) => {
@@ -287,6 +308,7 @@ function bindEvents() {
     syncEvidenceDrawerState();
     syncVoiceModeUI();
     syncChatCollapseUI();
+    requestMapResize({ settle: true });
   };
   window.addEventListener("resize", handleViewportChange);
   window.addEventListener("orientationchange", handleViewportChange);
@@ -347,6 +369,50 @@ function syncViewportHeight() {
   document.documentElement.style.setProperty("--viewport-bottom-gap", `${bottomGap}px`);
   document.documentElement.style.setProperty("--viewport-offset-top", `${keyboardOpen ? visualOffsetTop : 0}px`);
   document.documentElement.style.setProperty("--keyboard-open", keyboardOpen ? "1" : "0");
+}
+
+function syncMapViewportState() {
+  if (!map) return;
+  const center = map.getCenter?.();
+  const lng = Number(center?.getLng?.() ?? center?.lng);
+  const lat = Number(center?.getLat?.() ?? center?.lat);
+  state.map.center = Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : state.map.center;
+  const zoom = Number(map.getZoom?.());
+  state.map.zoom = Number.isFinite(zoom) ? zoom : state.map.zoom;
+}
+
+function requestMapResize({ settle = false } = {}) {
+  if (!map || typeof map.resize !== "function") return;
+  if (!mapRuntime.resizeFrame) {
+    mapRuntime.resizeFrame = window.requestAnimationFrame(() => {
+      mapRuntime.resizeFrame = 0;
+      map?.resize?.();
+      syncMapViewportState();
+    });
+  }
+  if (!settle) return;
+  window.clearTimeout(mapRuntime.resizeTimer);
+  mapRuntime.resizeTimer = window.setTimeout(() => {
+    map?.resize?.();
+    syncMapViewportState();
+  }, 380);
+}
+
+function selectMapPlace(record, source = "") {
+  const normalized = normalizeFavoriteRecord(record);
+  state.map.selectedPlaceId = normalized.id;
+  state.map.activeInfoWindow = source;
+  syncSelectedPlaceUI();
+  return normalized;
+}
+
+function syncSelectedPlaceUI() {
+  document.querySelectorAll(".place-card.is-clickable[data-poi-id]").forEach((card) => {
+    const selected = cleanText(card.dataset.poiId) === state.map.selectedPlaceId;
+    card.classList.toggle("is-selected", selected);
+    if (selected) card.setAttribute("aria-current", "location");
+    else card.removeAttribute("aria-current");
+  });
 }
 
 function restoreLocation() {
@@ -608,7 +674,7 @@ function renderRankingLayer() {
     addMapOverlay("rankings", marker);
   });
 
-  state.mapBounds = [];
+  state.map.bounds = [];
   renderMapLegend();
   renderLayerToggles();
   applyLayerVisibility();
@@ -704,7 +770,7 @@ function rankingMarkerContent(entry) {
 }
 
 function openRankingInfo(entry, position) {
-  if (!rankingInfoWindow || !map) return;
+  if (!mapRuntime.infoWindows.ranking || !map) return;
   const price = entry.price ? `人均 ${escapeHtml(String(entry.price))}` : "人均未标注";
   const cuisine = entry.cuisine ? escapeHtml(entry.cuisine) : "菜系未标注";
   const labels = (entry.labels || []).map((label) => `<span>${escapeHtml(label)}</span>`).join("");
@@ -718,7 +784,7 @@ function openRankingInfo(entry, position) {
     savedAt: new Date().toISOString()
   });
   const isFaved = isFavoriteId(favRecord.id);
-  rankingInfoWindow.setContent(`
+  mapRuntime.infoWindows.ranking.setContent(`
     <div class="ranking-info-window">
       <strong>${escapeHtml(entry.name)}</strong>
       <div class="ranking-info-tags">${labels}</div>
@@ -732,7 +798,8 @@ function openRankingInfo(entry, position) {
       </div>
     </div>
   `);
-  rankingInfoWindow.open(map, position);
+  mapRuntime.infoWindows.ranking.open(map, position);
+  selectMapPlace(favRecord, "ranking");
   window.setTimeout(() => {
     const favBtn = document.querySelector(".ranking-fav-btn");
     if (!favBtn) return;
@@ -742,7 +809,7 @@ function openRankingInfo(entry, position) {
       if (!record) return;
       const saved = toggleFavoriteRecord(record);
       pulseFavoriteButton(favBtn);
-      rankingInfoWindow.close();
+      mapRuntime.infoWindows.ranking.close();
       showToast(saved ? "已加入收藏" : "已取消收藏");
     }, { once: true });
   }, 50);
@@ -768,15 +835,16 @@ async function initMap() {
       doubleClickZoom: false
     });
 
-    rankingInfoWindow = new window.AMap.InfoWindow({
+    mapRuntime.infoWindows.ranking = new window.AMap.InfoWindow({
       offset: new window.AMap.Pixel(0, -24),
       closeWhenClickMap: true
     });
-    poiInfoWindow = new window.AMap.InfoWindow({
+    mapRuntime.infoWindows.poi = new window.AMap.InfoWindow({
       offset: new window.AMap.Pixel(0, -24),
       closeWhenClickMap: true
     });
 
+    syncMapViewportState();
     bindManualMapPick();
     await initGeolocation();
     bindViewportRankingDiscovery();
@@ -788,6 +856,8 @@ async function initMap() {
 function bindViewportRankingDiscovery() {
   if (!map) return;
   map.on("dragend", handleMapViewportChange);
+  map.on("moveend", syncMapViewportState);
+  map.on("zoomend", syncMapViewportState);
 }
 
 async function handleMapViewportChange() {
@@ -1058,7 +1128,7 @@ function renderNearbyMap(payload) {
     addMapOverlay("pois", marker);
   });
 
-  state.mapBounds = bounds;
+  state.map.bounds = bounds;
   fitMap();
   renderFavoriteMarkers();
   renderMapLegend();
@@ -1109,7 +1179,7 @@ function renderSuggestions() {
 }
 
 function handleAiDiscoveryClick(event) {
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   const button = event?.currentTarget;
   const targetKey = button?.dataset?.target || "questionInput";
   const targetInput = targetKey === "inlineQuestion" ? els.inlineInput : els.questionInput;
@@ -1123,7 +1193,7 @@ function handleAiDiscoveryClick(event) {
   syncDraftState();
   targetInput.focus();
   window.setTimeout(() => {
-    if (state.isAsking) return;
+    if (state.chat.isAsking) return;
     if (targetKey === "inlineQuestion") {
       handleInlineSend();
       return;
@@ -1191,7 +1261,7 @@ function applyActiveView() {
 
 function updateChatMode() {
   const hasMessages = Boolean(els.conversation?.children.length);
-  if (!hasMessages) state.isChatCollapsed = false;
+  if (!hasMessages) state.chat.isCollapsed = false;
   document.body.classList.toggle("has-messages", hasMessages);
   els.heroAskCard?.setAttribute("aria-hidden", hasMessages ? "true" : "false");
   els.followupInputBar?.setAttribute("aria-hidden", hasMessages ? "false" : "true");
@@ -1201,40 +1271,60 @@ function updateChatMode() {
 }
 
 function favoriteIdFromRecord(record) {
+  const suppliedId = cleanText(record?.id || record?.poiId);
+  if (suppliedId) return suppliedId;
   return `poi-${cleanText(record?.name)}-${cleanText(record?.address)}`.toLowerCase();
 }
 
 function normalizeFavoriteRecord(record) {
   const rankingLabels = Array.isArray(record?.rankingLabels) ? record.rankingLabels.filter(Boolean).map(String) : [];
-  const location = Array.isArray(record?.location) ? pointToString(record.location) : cleanText(record?.location);
-  const userNote = cleanText(record?.userNote || record?.note);
-  const normalized = {
+  const suppliedPoint = [Number(record?.lng ?? record?.longitude), Number(record?.lat ?? record?.latitude)];
+  const cachedPoint = parseLocation(record?.location);
+  const point = suppliedPoint.every(Number.isFinite) ? suppliedPoint : cachedPoint;
+  const location = point.length === 2 && point.every(Number.isFinite)
+    ? pointToString(point)
+    : cleanText(record?.location);
+  const note = cleanText(record?.note || record?.userNote);
+  const tags = Array.isArray(record?.tags) ? record.tags.filter(Boolean).map((tag) => cleanText(tag)).filter(Boolean) : [];
+  const now = new Date().toISOString();
+  const createdAt = cleanText(record?.createdAt || record?.savedAt) || now;
+  const updatedAt = cleanText(record?.updatedAt || record?.savedAt) || createdAt;
+  return {
     id: cleanText(record?.id) || favoriteIdFromRecord(record),
     name: cleanText(record?.name) || "地点",
     address: cleanText(record?.address),
     location,
+    lng: point.length === 2 && Number.isFinite(point[0]) ? point[0] : null,
+    lat: point.length === 2 && Number.isFinite(point[1]) ? point[1] : null,
+    tags,
+    note,
+    source: cleanText(record?.source || record?.savedSource) || "收藏",
+    createdAt,
+    updatedAt,
     type: cleanText(record?.type) || cleanText(record?.category),
     distance: cleanText(record?.distance),
     rankingLabels,
-    userNote,
-    savedSource: cleanText(record?.savedSource) || "收藏",
-    savedAt: cleanText(record?.savedAt) || new Date().toISOString()
+    // Retain the legacy field names so existing UI and local records keep working.
+    userNote: note,
+    savedSource: cleanText(record?.savedSource || record?.source) || "收藏",
+    savedAt: createdAt
   };
-  return normalized;
 }
 
 function favoriteRecordFromPoi(poi) {
   const address = cleanText([poi?.district, poi?.address].filter(Boolean).join(" "));
   const location = Array.isArray(poi?.location) ? pointToString(poi.location) : cleanText(poi?.location);
   const record = normalizeFavoriteRecord({
-    id: favoriteIdFromRecord({ name: poi?.name, address }),
+    id: cleanText(poi?.id || poi?.poiId) || favoriteIdFromRecord({ name: poi?.name, address }),
     name: poi?.name,
     address,
     location,
     type: poi?.type || state.filters.category,
     distance: poi?.distance,
     rankingLabels: Array.isArray(poi?.rankingLabels) ? poi.rankingLabels : [],
-    savedAt: new Date().toISOString()
+    source: "对话收藏",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   });
   return record;
 }
@@ -1271,14 +1361,22 @@ function toggleFavoriteRecord(record) {
 }
 
 function saveFavoriteRecord(record, note = "") {
-  const normalized = normalizeFavoriteRecord({ ...record, userNote: note });
+  const normalized = normalizeFavoriteRecord({ ...record, note });
   const index = state.favorites.findIndex((favorite) => favorite.id === normalized.id);
+  const existing = index >= 0 ? state.favorites[index] : null;
+  const merged = normalizeFavoriteRecord({
+    ...existing,
+    ...normalized,
+    tags: normalized.tags.length ? normalized.tags : existing?.tags,
+    createdAt: existing?.createdAt || existing?.savedAt || normalized.createdAt,
+    updatedAt: new Date().toISOString()
+  });
   if (index >= 0) {
     state.favorites.splice(index, 1);
   }
-  state.favorites.unshift(normalized);
+  state.favorites.unshift(merged);
   dispatchFavoritesChanged();
-  return normalized;
+  return merged;
 }
 
 function favoriteMetaLine(record) {
@@ -1311,7 +1409,7 @@ function favoriteButtonMarkup(record) {
 }
 
 function favoriteNoteMarkup(record) {
-  const note = cleanText(record?.userNote);
+  const note = cleanText(record?.note || record?.userNote);
   if (!note) return "";
   return `<div class="favorite-note">${escapeHtml(note)}</div>`;
 }
@@ -1319,9 +1417,9 @@ function favoriteNoteMarkup(record) {
 function renderFavoritesPanel() {
   if (!els.favoritesList) return;
   const orderedFavorites = [...state.favorites].sort((left, right) => {
-    const noteDelta = Number(Boolean(cleanText(right.userNote))) - Number(Boolean(cleanText(left.userNote)));
+    const noteDelta = Number(Boolean(cleanText(right.note || right.userNote))) - Number(Boolean(cleanText(left.note || left.userNote)));
     if (noteDelta) return noteDelta;
-    return String(right.savedAt || "").localeCompare(String(left.savedAt || ""));
+    return String(right.updatedAt || right.savedAt || "").localeCompare(String(left.updatedAt || left.savedAt || ""));
   });
   const count = orderedFavorites.length;
   if (els.favoritesCount) els.favoritesCount.textContent = `${count} 个地点`;
@@ -1346,7 +1444,7 @@ function renderFavoritesPanel() {
       ${orderedFavorites
         .map(
           (favorite, index) => `
-            <article class="place-card place-card--favorite is-clickable" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+            <article class="place-card place-card--favorite is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
               <div class="place-photo place-photo-rank">${index + 1}</div>
               <div class="place-card-main">
                 <strong>${escapeHtml(favorite.name)}</strong>
@@ -1361,6 +1459,7 @@ function renderFavoritesPanel() {
         .join("")}
     </div>
   `;
+  syncSelectedPlaceUI();
 }
 
 function renderSearchPanel() {
@@ -1415,13 +1514,14 @@ function renderSearchPanel() {
       ${results.map((poi) => searchResultCard(poi)).join("")}
     </div>
   `;
+  syncSelectedPlaceUI();
 }
 
 function searchResultCard(poi) {
   const favorite = favoriteRecordFromPoi(poi);
   const labels = [poi?.type, poi?.distance ? formatDistance(poi.distance) : ""].filter(Boolean).slice(0, 2);
   return `
-    <article class="place-card search-result-card is-clickable" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+    <article class="place-card search-result-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
       <div class="place-photo"></div>
       <div class="place-card-main">
         <strong>${escapeHtml(poi?.name || "地点")}</strong>
@@ -1552,39 +1652,39 @@ function isLayerVisible(layerKey) {
 function addMapOverlay(layerKey, overlay) {
   if (!overlay) return;
   if (layerKey === "walkRadius") {
-    walkRadiusOverlays.push(overlay);
+    mapRuntime.overlays.walkRadius.push(overlay);
   } else if (layerKey === "pois") {
-    poiOverlays.push(overlay);
+    mapRuntime.overlays.pois.push(overlay);
   } else if (layerKey === "rankings") {
-    rankingOverlays.push(overlay);
+    mapRuntime.overlays.rankings.push(overlay);
   } else {
-    baseOverlays.push(overlay);
+    mapRuntime.overlays.base.push(overlay);
   }
   overlay.setMap(isLayerVisible(layerKey) ? map : null);
 }
 
 function removeOverlayReference(overlay) {
   if (!overlay) return;
-  baseOverlays = baseOverlays.filter((item) => item !== overlay);
-  walkRadiusOverlays = walkRadiusOverlays.filter((item) => item !== overlay);
-  poiOverlays = poiOverlays.filter((item) => item !== overlay);
-  rankingOverlays = rankingOverlays.filter((item) => item !== overlay);
+  mapRuntime.overlays.base = mapRuntime.overlays.base.filter((item) => item !== overlay);
+  mapRuntime.overlays.walkRadius = mapRuntime.overlays.walkRadius.filter((item) => item !== overlay);
+  mapRuntime.overlays.pois = mapRuntime.overlays.pois.filter((item) => item !== overlay);
+  mapRuntime.overlays.rankings = mapRuntime.overlays.rankings.filter((item) => item !== overlay);
 }
 
 function visibleMapOverlays() {
   return [
-    ...baseOverlays,
-    ...(state.layers.walkRadius ? walkRadiusOverlays : []),
-    ...(state.layers.pois ? poiOverlays : []),
-    ...(state.layers.rankings ? rankingOverlays : [])
+    ...mapRuntime.overlays.base,
+    ...(state.layers.walkRadius ? mapRuntime.overlays.walkRadius : []),
+    ...(state.layers.pois ? mapRuntime.overlays.pois : []),
+    ...(state.layers.rankings ? mapRuntime.overlays.rankings : [])
   ].filter(Boolean);
 }
 
 function applyLayerVisibility() {
   if (!map) return;
-  walkRadiusOverlays.forEach((overlay) => overlay.setMap(state.layers.walkRadius ? map : null));
-  poiOverlays.forEach((overlay) => overlay.setMap(state.layers.pois ? map : null));
-  rankingOverlays.forEach((overlay) => overlay.setMap(state.layers.rankings ? map : null));
+  mapRuntime.overlays.walkRadius.forEach((overlay) => overlay.setMap(state.layers.walkRadius ? map : null));
+  mapRuntime.overlays.pois.forEach((overlay) => overlay.setMap(state.layers.pois ? map : null));
+  mapRuntime.overlays.rankings.forEach((overlay) => overlay.setMap(state.layers.rankings ? map : null));
 }
 
 function decodeFavoritePayload(raw) {
@@ -1617,14 +1717,14 @@ function pulseFavoriteButton(button) {
 }
 
 function clearFavoritePreview() {
-  if (!favoritePreviewOverlay) return;
+  if (!mapRuntime.favoritePreview) return;
   try {
-    favoritePreviewOverlay.setMap?.(null);
+    mapRuntime.favoritePreview.setMap?.(null);
   } catch {
     // ignore map cleanup failure
   }
-  removeOverlayReference(favoritePreviewOverlay);
-  favoritePreviewOverlay = null;
+  removeOverlayReference(mapRuntime.favoritePreview);
+  mapRuntime.favoritePreview = null;
 }
 
 function openFavoriteNoteSheet(record) {
@@ -1673,12 +1773,13 @@ function focusFavoriteOnMap(record) {
   }
 
   clearFavoritePreview();
-  favoritePreviewOverlay = new window.AMap.Marker({
+  mapRuntime.favoritePreview = new window.AMap.Marker({
     position: point,
     title: record?.name || "收藏地点",
     content: `<div class="map-favorite-star" aria-hidden="true">★</div>`
   });
-  addMapOverlay("base", favoritePreviewOverlay);
+  addMapOverlay("base", mapRuntime.favoritePreview);
+  selectMapPlace(record, "favorite");
   map.setZoomAndCenter(Math.max(Number(map.getZoom?.() || 15), 15), point);
 }
 
@@ -1724,8 +1825,17 @@ function handlePlaceCardInteraction(event) {
   focusFavoriteOnMap(record);
 }
 
+function handlePlaceCardKeydown(event) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  if (event.target instanceof Element && event.target.closest("button, input, textarea, select")) return;
+  const card = event.target instanceof Element ? event.target.closest(".place-card.is-clickable") : null;
+  if (!card) return;
+  event.preventDefault();
+  card.click();
+}
+
 async function handleSuggestedQuestion(question) {
-  if (!question || state.isAsking) return;
+  if (!question || state.chat.isAsking) return;
   await askAgent(question);
 }
 
@@ -1762,7 +1872,7 @@ function initVoiceInput() {
     state.voice.mobileHoldCanceled = false;
     if (shouldDiscard) restoreVoiceDraft();
     updateVoiceButtons();
-    setStatus(state.isAsking ? "查询中" : "在线");
+    setStatus(state.chat.isAsking ? "查询中" : "在线");
     const message = voiceErrorMessage(event?.error);
     if (message) showToast(message);
   });
@@ -1781,7 +1891,7 @@ function initVoiceInput() {
     }
     updateVoiceButtons();
     syncDraftState();
-    setStatus(state.isAsking ? "查询中" : "在线");
+    setStatus(state.chat.isAsking ? "查询中" : "在线");
     if (state.voice.pendingTargetKey) {
       const nextTargetKey = state.voice.pendingTargetKey;
       state.voice.pendingTargetKey = "";
@@ -1795,10 +1905,10 @@ function initVoiceInput() {
 }
 
 function resetContext() {
-  state.history = [];
-  state.summary = "";
+  state.chat.history = [];
+  state.chat.summary = "";
   if (els.conversation) els.conversation.innerHTML = "";
-  state.mapBounds = [];
+  state.map.bounds = [];
   clearMap();
   document.querySelector(".map-legend")?.remove();
   setEvidenceNotice("上下文已重置。你可以重新输入地点需求。");
@@ -1840,7 +1950,7 @@ function trimAddressForPrompt(address) {
 }
 
 function clearResultSurface(message = "正在查询...") {
-  state.mapBounds = [];
+  state.map.bounds = [];
   clearMap();
   document.querySelector(".map-legend")?.remove();
   setEvidenceNotice(message);
@@ -1863,7 +1973,7 @@ function friendlyErrorMessage(error) {
 
 async function handleQuestionSubmit(event) {
   event.preventDefault();
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   const question = els.questionInput?.value.trim();
   if (!question) return;
   if (els.questionInput) els.questionInput.value = "";
@@ -1874,7 +1984,7 @@ async function handleQuestionSubmit(event) {
 async function handleQuestionKeydown(event) {
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   const question = els.questionInput?.value.trim();
   if (!question) return;
   if (els.questionInput) els.questionInput.value = "";
@@ -1883,7 +1993,7 @@ async function handleQuestionKeydown(event) {
 }
 
 async function handleInlineSend() {
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   const question = els.inlineInput?.value.trim();
   if (!question) return;
   els.inlineInput.value = "";
@@ -1912,7 +2022,7 @@ function handleVoiceButtonClick(event) {
     showToast("当前环境暂不支持语音输入，请使用文字描述");
     return;
   }
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   if (isMobileHoldVoiceButton(button) && isMobileViewport()) {
     if (state.voice.suppressNextMobileClick) {
       state.voice.suppressNextMobileClick = false;
@@ -1937,10 +2047,10 @@ function handleVoiceButtonClick(event) {
 }
 
 async function askAgent(question) {
-  if (state.isAsking) return;
+  if (state.chat.isAsking) return;
   setAskingState(true);
   clearResultSurface("正在获取新的地点证据...");
-  state.history.push({ role: "user", content: question });
+  state.chat.history.push({ role: "user", content: question });
   appendMessage("user", question);
   updateChatMode();
 
@@ -1957,7 +2067,7 @@ async function askAgent(question) {
       "/api/agent/stream",
       {
         question,
-        history: state.history.slice(-40),
+        history: state.chat.history.slice(-40),
         context: buildContextPayload()
       },
       thinking
@@ -1967,11 +2077,11 @@ async function askAgent(question) {
     renderAgentMap(payload);
     renderAgentEvidence(payload);
     applyServerContext(payload.context);
-    state.history.push({
+    state.chat.history.push({
       role: "assistant",
       content: [payload.analysis, payload.answer].filter(Boolean).join("\n")
     });
-    state.summary = buildHistorySummary();
+    state.chat.summary = buildHistorySummary();
     renderContext();
     setStatus("完成");
     requestAnimationFrame(() => els.inlineInput?.focus());
@@ -2055,6 +2165,7 @@ function appendAnswer(payload, options = {}) {
   if (cards) message.querySelector(".message-body")?.insertAdjacentHTML("beforeend", cards);
   const followupChips = buildFollowupChipStrip(payload);
   if (followupChips) message.querySelector(".message-body")?.insertAdjacentHTML("beforeend", followupChips);
+  syncSelectedPlaceUI();
   hidePendingThinkingMessage();
   scrollConversationToBottom();
 }
@@ -2089,7 +2200,7 @@ function placeCard(poi) {
   const labels = poi?.rankingLabels?.length ? poi.rankingLabels : [state.filters.category].filter(Boolean);
   const favorite = favoriteRecordFromPoi(poi);
   return `
-    <article class="place-card is-clickable" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+    <article class="place-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
       <div class="place-photo"></div>
       <div class="place-card-main">
         <strong>${escapeHtml(name)}</strong>
@@ -2158,14 +2269,21 @@ async function streamAgentReply(path, body, thinkingElement) {
   let dataLines = [];
   let streamedText = "";
   let finalPayload = null;
+  let streamRenderFrame = 0;
+  let shouldStickToBottom = false;
+
+  const renderStreamedText = () => {
+    streamRenderFrame = 0;
+    const target = thinkingElement?.querySelector(".message-text");
+    if (target) target.textContent = streamedText;
+    if (shouldStickToBottom) scrollConversationToBottom(true);
+  };
 
   const applyDelta = (text) => {
     if (!text) return;
-    const shouldStick = isConversationNearBottom();
+    shouldStickToBottom = isConversationNearBottom();
     streamedText += text;
-    const target = thinkingElement?.querySelector(".message-text");
-    if (target) target.textContent = streamedText;
-    if (shouldStick) scrollConversationToBottom(true);
+    if (!streamRenderFrame) streamRenderFrame = window.requestAnimationFrame(renderStreamedText);
   };
 
   const handleEvent = (name, data) => {
@@ -2209,13 +2327,17 @@ async function streamAgentReply(path, body, thinkingElement) {
   }
 
   if (!finalPayload) throw new Error("查询没有返回完整结果");
+  if (streamRenderFrame) {
+    window.cancelAnimationFrame(streamRenderFrame);
+    renderStreamedText();
+  }
   const deepseekText = (streamedText || finalPayload.analysis || "").trim();
   if (deepseekText) {
     finalPayload.analysis = deepseekText;
     const target = thinkingElement?.querySelector(".message-text");
     if (target) target.textContent = deepseekText;
   }
-  thinkingElement?.classList.remove("is-pending");
+  // Keep the streamed placeholder marked as pending until appendAnswer replaces it.
   updateChatMode();
   return finalPayload;
 }
@@ -2246,12 +2368,12 @@ function buildContextPayload() {
     lastKeywords: state.filters.category,
     lastWalkMinutes: state.filters.walkMinutes,
     lastLocation: pointToString(state.location.location),
-    summary: state.summary
+    summary: state.chat.summary
   };
 }
 
 function buildHistorySummary() {
-  return state.history.slice(-12).map((item) => `${item.role}: ${item.content}`).join("\n").slice(-4000);
+  return state.chat.history.slice(-12).map((item) => `${item.role}: ${item.content}`).join("\n").slice(-4000);
 }
 
 function applyServerContext(context) {
@@ -2343,7 +2465,7 @@ function renderAgentMap(payload) {
     routePath.forEach((point) => bounds.push(point));
   }
 
-  state.mapBounds = bounds;
+  state.map.bounds = bounds;
   fitMap();
   renderFavoriteMarkers();
   renderMapLegend();
@@ -2495,7 +2617,7 @@ function syncEvidenceScrollbarWidth() {
 
 function toggleEvidenceRows() {
   if (isMobileViewport() && !state.mobileDrawerExpanded) {
-    state.mobileDrawerExpanded = true;
+    setEvidenceDrawerExpanded(true);
   }
   if (!state.evidenceRows.length || state.evidenceRows.length <= state.evidenceInitialLimit) return;
   state.evidenceExpanded = !state.evidenceExpanded;
@@ -2522,6 +2644,7 @@ function toggleEvidenceDrawer() {
 function setEvidenceDrawerExpanded(expanded) {
   state.mobileDrawerExpanded = Boolean(expanded);
   syncEvidenceDrawerState();
+  requestMapResize({ settle: true });
 }
 
 function syncEvidenceDrawerState() {
@@ -2530,6 +2653,7 @@ function syncEvidenceDrawerState() {
   const expanded = mobile ? state.mobileDrawerExpanded : true;
   document.body.classList.toggle("drawer-expanded", mobile && expanded);
   document.body.classList.toggle("drawer-collapsed", mobile && !expanded);
+  state.map.evidenceDrawerExpanded = mobile && expanded;
   els.evidenceDrawer.classList.toggle("is-collapsed", mobile && !expanded);
   els.evidenceDrawer.classList.toggle("is-expanded", mobile && expanded);
   els.evidenceDrawerToggle.setAttribute("aria-expanded", String(expanded));
@@ -2588,7 +2712,7 @@ function bindMobileVoiceHoldEvents() {
           showToast("当前环境暂不支持语音输入，请使用文字描述");
           return;
         }
-        if (state.isAsking) return;
+        if (state.chat.isAsking) return;
         const touch = event.changedTouches?.[0];
         if (!touch) return;
         event.preventDefault();
@@ -2661,7 +2785,7 @@ function isMobileHoldVoiceButton(button) {
 }
 
 function setAskingState(isAsking) {
-  state.isAsking = isAsking;
+  state.chat.isAsking = isAsking;
   document.body.classList.toggle("is-asking", isAsking);
   const sendButton = els.form?.querySelector(".send-fab");
   if (sendButton) {
@@ -2684,8 +2808,8 @@ function syncDraftState() {
   const hasMainDraft = Boolean(els.questionInput?.value.trim());
   const hasInlineDraft = Boolean(els.inlineInput?.value.trim());
   const sendButton = els.form?.querySelector(".send-fab");
-  sendButton?.classList.toggle("is-ready", hasMainDraft && !state.isAsking);
-  els.inlineSend?.classList.toggle("is-ready", hasInlineDraft && !state.isAsking);
+  sendButton?.classList.toggle("is-ready", hasMainDraft && !state.chat.isAsking);
+  els.inlineSend?.classList.toggle("is-ready", hasInlineDraft && !state.chat.isAsking);
 }
 
 function startVoiceRecognition(targetKey) {
@@ -2752,7 +2876,7 @@ function updateVoiceButtons() {
     const isInlineModeToggle = button === els.inlineVoiceButton && isMobileViewport();
     const isInlineHoldButton = button === els.mobileInlineVoiceButton && isMobileViewport();
     button.hidden = isInlineHoldButton ? (!state.voice.supported || !state.isVoiceMode) : !state.voice.supported;
-    button.disabled = state.isAsking;
+    button.disabled = state.chat.isAsking;
     const isCurrentTarget = button.dataset.target === state.voice.targetKey;
     button.classList.toggle("is-listening", state.voice.isListening && isCurrentTarget);
     button.classList.toggle("is-pressing", isMobileHoldVoiceButton(button) && state.voice.mobileHoldActive && isCurrentTarget && !state.voice.mobileHoldCanceled);
@@ -2802,7 +2926,7 @@ function syncVoiceModeUI() {
 function toggleChatCollapsed(forceValue) {
   const hasMessages = Boolean(els.conversation?.children.length);
   if (!isMobileViewport() || !hasMessages) return;
-  state.isChatCollapsed = typeof forceValue === "boolean" ? forceValue : !state.isChatCollapsed;
+  state.chat.isCollapsed = typeof forceValue === "boolean" ? forceValue : !state.chat.isCollapsed;
   syncChatCollapseUI();
 }
 
@@ -2810,11 +2934,15 @@ function syncChatCollapseUI() {
   const mobile = isMobileViewport();
   const hasMessages = Boolean(els.conversation?.children.length);
   if (!mobile || !hasMessages) {
-    state.isChatCollapsed = false;
+    state.chat.isCollapsed = false;
   }
-  const collapsed = mobile && hasMessages && state.isChatCollapsed;
+  const collapsed = mobile && hasMessages && state.chat.isCollapsed;
   document.body.classList.toggle("chat-collapsed", collapsed);
   els.chatPanel?.classList.toggle("is-collapsed", collapsed);
+  if (state.map.chatDrawerCollapsed !== collapsed) {
+    state.map.chatDrawerCollapsed = collapsed;
+    requestMapResize({ settle: true });
+  }
   if (els.chatPanelToggle) {
     els.chatPanelToggle.setAttribute("aria-expanded", String(!collapsed));
     els.chatPanelToggle.setAttribute("aria-label", collapsed ? "展开聊天面板" : "收起聊天面板");
@@ -2867,6 +2995,9 @@ function showToast(message) {
   if (!toast) {
     toast = document.createElement("div");
     toast.className = "app-toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    toast.setAttribute("aria-atomic", "true");
     document.body.appendChild(toast);
   }
   toast.textContent = message;
@@ -2935,15 +3066,21 @@ function renderMapLegend() {
 }
 
 function openPoiInfo(poi, point) {
-  if (!poiInfoWindow || !map) return;
-  poiInfoWindow.setContent(`
+  if (!mapRuntime.infoWindows.poi || !map) return;
+  mapRuntime.infoWindows.poi.setContent(`
     <div class="poi-info-window">
       <strong>${escapeHtml(poi?.name || "地点")}</strong>
       <p>${escapeHtml([poi?.district, poi?.area, poi?.address].filter(Boolean).join(" · "))}</p>
       <p>${poi?.distance ? `距离约 ${escapeHtml(formatDistance(poi.distance))}` : ""}</p>
     </div>
   `);
-  poiInfoWindow.open(map, point);
+  mapRuntime.infoWindows.poi.open(map, point);
+  selectMapPlace({
+    id: cleanText(poi?.id || poi?.poiId),
+    name: poi?.name,
+    address: [poi?.district, poi?.area, poi?.address].filter(Boolean).join(" "),
+    location: point
+  }, "poi");
 }
 
 function legendPinSvg() {
@@ -2968,19 +3105,22 @@ function renderEvidenceNotice(message) {
 }
 
 function clearMap() {
-  [...baseOverlays, ...walkRadiusOverlays, ...poiOverlays, ...rankingOverlays].forEach((overlay) => overlay.setMap?.(null));
-  baseOverlays = [];
-  walkRadiusOverlays = [];
-  poiOverlays = [];
-  rankingOverlays = [];
-  favoritePreviewOverlay = null;
-  poiInfoWindow?.close?.();
-  rankingInfoWindow?.close?.();
+  [...mapRuntime.overlays.base, ...mapRuntime.overlays.walkRadius, ...mapRuntime.overlays.pois, ...mapRuntime.overlays.rankings].forEach((overlay) => overlay.setMap?.(null));
+  mapRuntime.overlays.base = [];
+  mapRuntime.overlays.walkRadius = [];
+  mapRuntime.overlays.pois = [];
+  mapRuntime.overlays.rankings = [];
+  mapRuntime.favoritePreview = null;
+  mapRuntime.infoWindows.poi?.close?.();
+  mapRuntime.infoWindows.ranking?.close?.();
+  state.map.selectedPlaceId = "";
+  state.map.activeInfoWindow = "";
+  syncSelectedPlaceUI();
 }
 
 function clearFavoriteMarkers() {
-  favoriteStarOverlays.forEach((overlay) => overlay.setMap?.(null));
-  favoriteStarOverlays = [];
+  mapRuntime.overlays.favorites.forEach((overlay) => overlay.setMap?.(null));
+  mapRuntime.overlays.favorites = [];
 }
 
 function renderFavoriteMarkers() {
@@ -2997,21 +3137,21 @@ function renderFavoriteMarkers() {
       content: `<div class="map-favorite-star" title="${escapeHtml(record.name || "收藏地点")}">★</div>`
     });
     marker.on("click", () => focusFavoriteOnMap(record));
-    favoriteStarOverlays.push(marker);
+    mapRuntime.overlays.favorites.push(marker);
     marker.setMap(map);
   });
 }
 
 function clearRankingOverlays() {
-  rankingOverlays.forEach((overlay) => overlay.setMap?.(null));
-  rankingOverlays = [];
-  rankingInfoWindow?.close?.();
+  mapRuntime.overlays.rankings.forEach((overlay) => overlay.setMap?.(null));
+  mapRuntime.overlays.rankings = [];
+  mapRuntime.infoWindows.ranking?.close?.();
 }
 
 function fitMap() {
-  if (!map || !state.mapBounds.length) return;
-  if (state.mapBounds.length === 1) {
-    map.setZoomAndCenter(15, state.mapBounds[0]);
+  if (!map || !state.map.bounds.length) return;
+  if (state.map.bounds.length === 1) {
+    map.setZoomAndCenter(15, state.map.bounds[0]);
     return;
   }
   const overlays = visibleMapOverlays();
