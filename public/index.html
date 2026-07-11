@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
     <title>高德 AI 地图助手</title>
-    <link rel="stylesheet" href="/styles.css?v=20260711-phase2" />
+    <link rel="stylesheet" href="/styles.css?v=20260711-chat-fallback" />
   </head>
   <body>
     <main class="main-dashboard-layout">
@@ -76,25 +76,40 @@
             <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么值得去的地方？”</div>
           </section>
 
-          <section class="chat-panel" id="chatPanel" aria-live="polite">
-            <button
-              class="chat-panel-header"
-              id="chatPanelToggle"
-              type="button"
-              aria-expanded="true"
-              aria-controls="conversation"
-              aria-label="收起聊天面板"
-            >
-              <span class="chat-panel-header-copy">
-                <strong class="chat-panel-title">聊天记录</strong>
-                <span class="chat-panel-hint" id="chatPanelHint">点击收起，把更多空间留给地图</span>
-              </span>
-              <span class="chat-panel-chevron" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="m7 10 5 5 5-5" />
+          <section class="chat-panel" id="chatPanel" aria-live="polite" aria-label="聊天记录">
+            <header class="chat-panel-header" id="chatPanelDragHandle">
+              <button
+                class="chat-panel-collapse-control"
+                id="chatPanelToggle"
+                type="button"
+                aria-expanded="true"
+                aria-controls="conversation"
+                aria-label="收起聊天面板"
+              >
+                <span class="chat-panel-header-copy">
+                  <strong class="chat-panel-title">聊天记录</strong>
+                  <span class="chat-panel-hint" id="chatPanelHint">上滑全屏，下拉后查看地图</span>
+                </span>
+                <span class="chat-panel-chevron" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="m7 10 5 5 5-5" />
+                  </svg>
+                </span>
+              </button>
+              <button
+                class="chat-panel-fullscreen-control"
+                id="chatPanelFullscreenToggle"
+                type="button"
+                aria-pressed="false"
+                aria-label="全屏查看聊天"
+                title="全屏查看聊天"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="chat-expand-path" d="M15 3h6v6M21 3l-7 7M3 21l7-7M9 21H3v-6" />
+                  <path class="chat-restore-path" d="m14 10 7-7M20 10h-6V4M3 21l7-7M4 14h6v6" />
                 </svg>
-              </span>
-            </button>
+              </button>
+            </header>
 
             <section class="chat-stream">
               <section class="conversation" id="conversation" aria-live="polite"></section>
@@ -238,6 +253,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260711-phase2" type="module"></script>
+    <script src="/app.js?v=20260711-chat-fallback" type="module"></script>
   </body>
 </html>

@@ -298,7 +298,10 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
   }
 
   if (plan.intent === "nearby") {
-    const origin = await resolveNearbyOrigin(plan, session.context || {});
+    const origin = await resolveNearbyOrigin(plan, session.context || {}, question);
+    const responsePlan = origin.resolvedOutsideCity && origin.city
+      ? { ...plan, city: origin.city }
+      : plan;
     const rawPois = await searchAroundForQuery({
       location: origin.location,
       keywords: plan.keywords,
@@ -324,10 +327,10 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
           origin,
           {
             formattedAddress: [nearest.district, nearest.address].filter(Boolean).join(" ") || nearest.name,
-            city: nearest.city || plan.city,
+            city: nearest.city || responsePlan.city,
             location: nearest.location
           },
-          plan.city
+          responsePlan.city
         );
       } catch {
         nearestRoute = null;
@@ -336,11 +339,14 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     const routeSummary = nearestRoute
       ? `；${routeModeLabel(nearestRouteMode)}约 ${(nearestRoute.distanceMeters / 1000).toFixed(2)} 公里，预计 ${Math.round(nearestRoute.durationSeconds / 60)} 分钟`
       : "";
+    const crossCityLead = origin.resolvedOutsideCity
+      ? `${origin.fallbackFromCity || plan.city}没有找到名称可信匹配“${plan.address}”的地点，我为你定位到了${origin.city || "外地"}的${origin.name || plan.address}。`
+      : "";
     return maybeFinalizeAgentResponse({
       intent: "nearby",
       planner: plan.planner,
       question,
-      city: plan.city,
+      city: responsePlan.city,
       analysis: buildNearbyAnalysis({
         origin,
         radius: plan.radius,
@@ -349,8 +355,8 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
         top
       }),
       answer: nearest
-        ? `距离 ${origin.formattedAddress} 最近的「${plan.keywords}」是 ${nearest.name}，直线距离约 ${nearest.distance || Math.round(distanceMeters(origin.location, nearest.location))} 米${routeSummary}。`
-        : `我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内没有找到名称明确匹配「${plan.keywords}」的地点。`,
+        ? `${crossCityLead}距离 ${origin.formattedAddress} 最近的「${plan.keywords}」是 ${nearest.name}，直线距离约 ${nearest.distance || Math.round(distanceMeters(origin.location, nearest.location))} 米${routeSummary}。`
+        : `${crossCityLead}我在 ${origin.formattedAddress} 附近 ${plan.radius} 米内没有找到名称明确匹配「${plan.keywords}」的地点。`,
       map: {
         mode: "pois",
         center: origin.location,
@@ -370,8 +376,11 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
           : null
       },
       data: {
-        plan: { ...plan, routeMode: nearestRouteMode || plan.routeMode },
+        plan: { ...responsePlan, routeMode: nearestRouteMode || plan.routeMode },
         origin,
+        lookupFallback: origin.resolvedOutsideCity
+          ? { fromCity: origin.fallbackFromCity || plan.city, toCity: origin.city, nationwide: true }
+          : null,
         radius: plan.radius,
         pois: top,
         allPois: taggedPois.slice(0, 80),
@@ -379,9 +388,9 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
         nearestPoi: nearest
       },
       source: nearestRoute
-        ? `DeepSeek/规则解析 + 高德周边搜索 + 高德${routeModeLabel(nearestRouteMode)}路径规划`
-        : "DeepSeek/规则解析 + 高德周边搜索",
-      context: buildNextContext({ question, plan, origin })
+        ? `DeepSeek/规则解析 + 高德${origin.resolvedOutsideCity ? "全国地点兜底 + " : ""}周边搜索 + 高德${routeModeLabel(nearestRouteMode)}路径规划`
+        : `DeepSeek/规则解析 + 高德${origin.resolvedOutsideCity ? "全国地点兜底 + " : ""}周边搜索`,
+      context: buildNextContext({ question, plan: responsePlan, origin })
     }, session, options);
   }
 
@@ -450,24 +459,82 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
     }, session, options);
   }
 
-  const searchResult = await searchTextWithMeta({
+  let searchResult = await searchTextWithMeta({
     keywords: plan.keywords,
     city: plan.city,
     pageSize: 25,
     pages: plan.countMode ? 6 : 2,
     countMode: plan.countMode
   });
+  let lookupFallback = null;
+  const specificPlaceLookup = !plan.countMode && isSpecificPlaceLookup(question);
+  if (specificPlaceLookup) {
+    const localMatches = filterCrediblePlaceMatches(plan.keywords, searchResult.pois);
+    searchResult = {
+      ...searchResult,
+      pois: localMatches,
+      estimatedCount: localMatches.length
+    };
+
+    if (!localMatches.length && plan.city && !containsExplicitCity(question)) {
+      const nationwideResult = await searchTextWithMeta({
+        keywords: plan.keywords,
+        city: "",
+        pageSize: 25,
+        pages: 2,
+        countMode: false
+      });
+      let nationwideMatches = filterCrediblePlaceMatches(plan.keywords, nationwideResult.pois);
+      if (!nationwideMatches.length) {
+        await waitBeforeRetry(0);
+        const retryPois = await searchText({ keywords: plan.keywords, city: "", pageSize: 25, pages: 2 });
+        nationwideMatches = filterCrediblePlaceMatches(plan.keywords, retryPois);
+      }
+      if (nationwideMatches.length) {
+        const resolvedArea = nationwideMatches[0].city
+          ? null
+          : await reverseGeocodeLocation(nationwideMatches[0].location).catch(() => null);
+        const resolvedCity = nationwideMatches[0].city || resolvedArea?.city || "";
+        const hydratedMatches = nationwideMatches.map((poi) => ({
+          ...poi,
+          city: poi.city || resolvedCity,
+          district: poi.district || resolvedArea?.district || ""
+        }));
+        lookupFallback = {
+          fromCity: plan.city,
+          toCity: resolvedCity,
+          nationwide: true
+        };
+        searchResult = {
+          ...nationwideResult,
+          pois: hydratedMatches,
+          estimatedCount: hydratedMatches.length
+        };
+      }
+    }
+  }
   const taggedPois = rankPoisForRecommendation(tagRankingsForPois(searchResult.pois), {
     keywords: plan.keywords
   });
   const top = taggedPois.slice(0, 10);
+  const responsePlan = lookupFallback?.toCity
+    ? { ...plan, city: lookupFallback.toCity }
+    : plan;
+  const fallbackAddress = top[0]
+    ? compactAddressParts([top[0].city, top[0].district, top[0].address])
+    : "";
+  const searchAnswer = lookupFallback && top[0]
+    ? `${lookupFallback.fromCity}没有找到名称可信匹配“${plan.keywords}”的地点，但我为你找到了${lookupFallback.toCity || "全国范围"}的${top[0].name}${fallbackAddress ? `，地址是${fallbackAddress}` : ""}。`
+    : specificPlaceLookup && !top.length
+      ? `我在${plan.city || "当前城市"}${plan.city && !containsExplicitCity(question) ? "以及全国范围内" : ""}都没有找到名称可信匹配“${plan.keywords}”的地点。`
+      : `我用「${plan.keywords}」在${plan.city || "全国"}搜索到了 ${taggedPois.length} 个高德 POI，当前先展示前 ${top.length} 个。`;
   return maybeFinalizeAgentResponse({
     intent: "search",
     planner: plan.planner,
     question,
-    city: plan.city,
+    city: responsePlan.city,
       analysis: buildSearchAnalysis({
-        city: plan.city,
+        city: responsePlan.city,
         keywords: plan.keywords,
         countMode: plan.countMode,
         estimatedCount: searchResult.estimatedCount,
@@ -477,22 +544,23 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
       }),
     answer: plan.countMode
       ? `${searchResult.countExhaustive ? "我用" : "我至少用"}「${plan.keywords}」在${plan.city || "全国"}范围内基于高德真实结果查到了${searchResult.countExhaustive ? `${searchResult.estimatedCount}` : `至少 ${searchResult.estimatedCount}`}家相关门店。`
-      : `我用「${plan.keywords}」在${plan.city || "全国"}搜索到了 ${taggedPois.length} 个高德 POI，当前先展示前 ${top.length} 个。`,
+      : searchAnswer,
     map: {
       mode: "pois",
-      center: top[0]?.location || defaultCityCenter(plan.city),
+      center: top[0]?.location || defaultCityCenter(responsePlan.city),
       markers: top.map((poi, index) => poiToMarker(poi, String(index + 1))),
       legends: rankingLegendSummary(top)
     },
     data: {
-      plan,
+      plan: responsePlan,
+      lookupFallback,
       totalCount: searchResult.estimatedCount,
       countExhaustive: searchResult.countExhaustive,
       pois: top,
       allPois: plan.countMode ? taggedPois : taggedPois.slice(0, 80)
     },
-    source: "DeepSeek/规则解析 + 高德关键字搜索",
-    context: buildNextContext({ question, plan })
+    source: `DeepSeek/规则解析 + 高德${lookupFallback ? "全国地点兜底 + " : ""}关键字搜索`,
+    context: buildNextContext({ question, plan: responsePlan })
   }, session, options);
 }
 
@@ -623,7 +691,9 @@ function normalizePlan(rawPlan, question, session = {}) {
   }
 
   const parsed = parseSearchQuestion(question, context);
-  plan.keywords = normalizeKnownBrandKeyword(question, cleanupPlace(rawPlan.keywords || parsed.keywords || question));
+  plan.keywords = cleanupSearchKeywords(
+    normalizeKnownBrandKeyword(question, cleanupPlace(rawPlan.keywords || parsed.keywords || question))
+  );
   plan.countMode = Boolean(rawPlan.countMode || parsed.countMode);
   plan.limit = parseRecommendationLimit(question);
   return plan;
@@ -968,13 +1038,24 @@ function parseSearchQuestion(question, context = {}) {
   const inherited = /(那里|那边|那附近|这边|这附近|继续|再找|还有没有)/.test(question) ? context.lastAddress || "" : "";
   return {
     countMode: /(一共|总共|总计|共有|多少家|几家|多少个|门店数|门店数量)/.test(question),
-    keywords: cleanupPlace(
+    keywords: cleanupSearchKeywords(
       question
         .replace(/^(帮我|请|查询|查一下|找一下|搜索)/, "")
         .replace(/一共|总共|总计|共有|多少家|几家|多少个|门店数|门店数量|有哪些|哪里|附近|高德|地图/g, " ")
     ),
     addressHint: inherited
   };
+}
+
+function cleanupSearchKeywords(value) {
+  return cleanupPlace(value)
+    .replace(/(?:在)?哪(?:里|儿)?|位置(?:在哪里)?|具体地址|地址是什么|怎么去/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSpecificPlaceLookup(question) {
+  return /在哪(?:里|儿)?|位置(?:在哪里)?|地址(?:是什么)?|怎么去/.test(String(question || ""));
 }
 
 function inferNearbyKeyword(text) {
@@ -994,6 +1075,7 @@ function normalizeNearbyKeywords(rawKeywords, parsedKeywords) {
   const raw = cleanupPlace(rawKeywords || "");
   const parsed = cleanupPlace(parsedKeywords || "");
   if (!raw) return parsed || "餐饮";
+  if (/^(吃的|吃饭|餐饮|餐厅|美食|饭店|小吃)$/.test(raw)) return parsed || "餐饮";
   if (/(情侣|约会|散步|遛弯|夜晚|晚上|夜景)/.test(raw) && parsed) return parsed;
   if (/(朋友聚餐|聚餐|人均|吃饭)/.test(raw) && parsed) return parsed;
   return raw || parsed || "餐饮";
@@ -1518,8 +1600,10 @@ async function streamDeepSeekNarration(result, session = {}, res) {
 function buildNarrationPrompt(result, session = {}) {
   const history = Array.isArray(session.history) ? session.history.slice(-12) : [];
   const exactNames = collectExactPoiNames(result);
+  const lookupFallback = result?.data?.lookupFallback;
   const facts = {
     question: result.question,
+    answer: result.answer,
     city: result.city,
     intent: result.intent,
     source: result.source,
@@ -1529,6 +1613,9 @@ function buildNarrationPrompt(result, session = {}) {
   return [
     `你是 AI 地图助手。用户刚才问了：${result.question}。`,
     `通过高德 API 查询到的真实数据如下：${JSON.stringify(facts, null, 2)}。`,
+    lookupFallback
+      ? `这是一次跨城市兜底检索。回答开头必须明确说明：在${lookupFallback.fromCity || "用户当前城市"}没有找到名称可信匹配的目标，已改为展示${lookupFallback.toCity || "全国范围"}的真实结果。不要省略这层说明。`
+      : "本次没有触发跨城市兜底。",
     `如果你需要提到具体门店或地点名称，只能从这份原始名称清单里逐字引用：${JSON.stringify(exactNames)}。`,
     `历史对话如下：${JSON.stringify(history, null, 2)}。`,
     "请结合上述真实数据，用亲切、自然的拟人化语言回答用户。回答风格要跟随问题本身：如果用户在问总数、规模、多少家，就优先直接回答数量和统计口径；如果用户在问推荐、附近、去哪儿，再进入推荐式表达。绝对不要把所有问题都回答成同一种模板。"
@@ -1897,7 +1984,7 @@ async function searchAroundForQuery({ location, keywords, radius = 2000, pageSiz
   return dedupePois(groups.flat());
 }
 
-async function resolveNearbyOrigin(plan, context = {}) {
+async function resolveNearbyOrigin(plan, context = {}, question = "") {
   if (plan.useCurrentLocation && isLocationString(context.lastLocation || "")) {
     return {
       formattedAddress: context.lastResolvedOrigin || context.lastAddress || "当前定位",
@@ -1909,7 +1996,9 @@ async function resolveNearbyOrigin(plan, context = {}) {
       name: context.lastAddress || "当前定位"
     };
   }
-  return resolvePlaceAnchor(plan.address, plan.city);
+  return resolvePlaceAnchor(plan.address, plan.city, {
+    allowNationwideFallback: !containsExplicitCity(question)
+  });
 }
 
 function isLocationString(value) {
@@ -2085,21 +2174,53 @@ function dedupeRecommendationPois(pois) {
   return [...bestByKey.values()];
 }
 
-async function resolvePlaceAnchor(address, city = "") {
+async function resolvePlaceAnchor(address, city = "", options = {}) {
   const pois = await searchText({ keywords: address, city, pageSize: 8, pages: 1 });
   const bestPoi = chooseBestAnchorPoi(address, city, pois);
   if (bestPoi?.location) {
-    return {
-      formattedAddress: compactAddressParts([bestPoi.city || city, bestPoi.district, bestPoi.address]),
-      province: "",
-      city: bestPoi.city || city,
-      district: bestPoi.district || "",
-      location: bestPoi.location,
-      level: "poi",
-      name: bestPoi.name
-    };
+    return placeAnchorFromPoi(bestPoi, city);
+  }
+
+  if (options.allowNationwideFallback && city) {
+    let nationwidePois = await searchText({ keywords: address, city: "", pageSize: 20, pages: 2 });
+    let nationwideBest = chooseBestAnchorPoi(address, "", nationwidePois);
+    if (!nationwideBest) {
+      await waitBeforeRetry(0);
+      nationwidePois = await searchText({ keywords: address, city: "", pageSize: 20, pages: 2 });
+      nationwideBest = chooseBestAnchorPoi(address, "", nationwidePois);
+    }
+    if (nationwideBest?.location) {
+      const resolvedArea = nationwideBest.city
+        ? null
+        : await reverseGeocodeLocation(nationwideBest.location).catch(() => null);
+      const hydratedPoi = {
+        ...nationwideBest,
+        city: nationwideBest.city || resolvedArea?.city || "",
+        district: nationwideBest.district || resolvedArea?.district || ""
+      };
+      const anchor = placeAnchorFromPoi(hydratedPoi, city);
+      return {
+        ...anchor,
+        resolvedOutsideCity: !sameAdministrativeCity(city, anchor.city),
+        fallbackFromCity: city
+      };
+    }
   }
   return geocode(address, city);
+}
+
+function placeAnchorFromPoi(poi, fallbackCity = "") {
+  return {
+    formattedAddress: compactAddressParts([poi.city || fallbackCity, poi.district, poi.address]),
+    province: "",
+    city: poi.city || fallbackCity,
+    district: poi.district || "",
+    location: poi.location,
+    level: "poi",
+    name: poi.name,
+    resolvedOutsideCity: false,
+    fallbackFromCity: ""
+  };
 }
 
 function compactAddressParts(parts) {
@@ -2120,15 +2241,41 @@ function chooseBestAnchorPoi(address, city, pois) {
   const scored = pois.map((poi) => {
     const poiName = normalizeLooseText(poi.name);
     const poiAddress = normalizeLooseText([poi.city, poi.district, poi.address].filter(Boolean).join(" "));
-    let score = 0;
-    if (poiName === normalizedAddress) score += 100;
-    else if (poiName.includes(normalizedAddress) || normalizedAddress.includes(poiName)) score += 60;
+    const nameScore = isAncillaryPlacePoi(poi) ? 0 : placeNameMatchScore(normalizedAddress, poiName);
+    let score = nameScore;
     if (normalizedCity && normalizeLooseText(poi.city).includes(normalizedCity)) score += 40;
     if (normalizedCity && poiAddress.includes(normalizedCity)) score += 20;
-    return { poi, score };
+    return { poi, score, nameScore };
   });
   scored.sort((a, b) => b.score - a.score);
-  return scored[0].poi;
+  return scored[0].nameScore > 0 ? scored[0].poi : null;
+}
+
+function filterCrediblePlaceMatches(keywords, pois) {
+  const normalizedKeywords = normalizeLooseText(keywords);
+  return (pois || []).filter((poi) =>
+    placeNameMatchScore(normalizedKeywords, normalizeLooseText(poi.name)) > 0 && !isAncillaryPlacePoi(poi)
+  );
+}
+
+function isAncillaryPlacePoi(poi) {
+  return /停车|充电|出入口|入口|出口|客服|服务台|消防|委员会|管理处|卫生间|洗手间/.test(
+    String([poi?.name, poi?.type].filter(Boolean).join(" "))
+  );
+}
+
+function placeNameMatchScore(normalizedQuery, normalizedName) {
+  if (!normalizedQuery || !normalizedName) return 0;
+  if (normalizedName === normalizedQuery) return 100;
+  if (normalizedName.includes(normalizedQuery) || normalizedQuery.includes(normalizedName)) return 60;
+  return 0;
+}
+
+function sameAdministrativeCity(left, right) {
+  const normalizeCityName = (value) => String(value || "").toLowerCase().replace(/\s+/g, "").replace(/市$/, "");
+  const normalizedLeft = normalizeCityName(left);
+  const normalizedRight = normalizeCityName(right);
+  return Boolean(normalizedLeft && normalizedRight && (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)));
 }
 
 async function geocode(address, city = "") {
@@ -2141,6 +2288,22 @@ async function geocode(address, city = "") {
     throw new Error(`没有找到地址：${address}`);
   }
   return normalizeGeocode(geocodeResult);
+}
+
+async function reverseGeocodeLocation(location) {
+  const payload = await amapGet("/v3/geocode/regeo", {
+    location,
+    extensions: "base"
+  });
+  const regeocode = payload.regeocode || {};
+  const component = regeocode.addressComponent || {};
+  const province = textOrEmpty(component.province);
+  const city = textOrEmpty(component.city) || (/^(上海|北京|天津|重庆)市$/.test(province) ? province : "");
+  return {
+    city,
+    district: textOrEmpty(component.district),
+    formattedAddress: textOrEmpty(regeocode.formatted_address)
+  };
 }
 
 function resolveRouteMode(requestedMode, origin, destination) {

@@ -20,7 +20,9 @@ const els = {
   mobileInlineVoiceButton: $("#mobileInlineVoiceButton"),
   inlineSend: $("#inlineSend"),
   chatPanel: $("#chatPanel"),
+  chatPanelDragHandle: $("#chatPanelDragHandle"),
   chatPanelToggle: $("#chatPanelToggle"),
+  chatPanelFullscreenToggle: $("#chatPanelFullscreenToggle"),
   chatPanelHint: $("#chatPanelHint"),
   conversation: $("#conversation"),
   evidence: $("#evidence"),
@@ -85,7 +87,8 @@ const state = {
     history: [],
     summary: "",
     isAsking: false,
-    isCollapsed: false
+    isCollapsed: false,
+    isFullscreen: false
   },
   map: {
     bounds: [],
@@ -94,6 +97,7 @@ const state = {
     selectedPlaceId: "",
     activeInfoWindow: "",
     chatDrawerCollapsed: false,
+    chatDrawerMode: "half",
     evidenceDrawerExpanded: false
   },
   nearbyRequestId: 0,
@@ -161,6 +165,7 @@ const mapRuntime = {
 };
 let guideDismissTimer = 0;
 let searchDebounceTimer = 0;
+let chatDrawerGestureAt = 0;
 
 const suggestions = [
   {
@@ -268,6 +273,7 @@ function bindEvents() {
   els.inlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
   els.mobileInlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
   els.chatPanelToggle?.addEventListener("click", () => toggleChatCollapsed());
+  els.chatPanelFullscreenToggle?.addEventListener("click", () => toggleChatFullscreen());
   els.questionInput?.addEventListener("input", syncDraftState);
   els.inlineInput?.addEventListener("input", syncDraftState);
   els.moreButton?.addEventListener("click", toggleEvidenceRows);
@@ -303,6 +309,7 @@ function bindEvents() {
   window.addEventListener("favorites-changed", handleFavoritesChanged);
   bindMobileVoiceHoldEvents();
   bindEvidenceDrawerGestures();
+  bindChatDrawerGestures();
   const handleViewportChange = () => {
     syncViewportHeight();
     syncEvidenceDrawerState();
@@ -316,6 +323,9 @@ function bindEvents() {
   window.visualViewport?.addEventListener("scroll", handleViewportChange);
   document.addEventListener("focusin", () => window.setTimeout(handleViewportChange, 24), true);
   document.addEventListener("focusout", () => window.setTimeout(handleViewportChange, 180), true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.chat.isFullscreen) setChatDrawerMode("half");
+  });
   syncDraftState();
   syncEvidenceDrawerState();
   setAskingState(false);
@@ -1261,7 +1271,10 @@ function applyActiveView() {
 
 function updateChatMode() {
   const hasMessages = Boolean(els.conversation?.children.length);
-  if (!hasMessages) state.chat.isCollapsed = false;
+  if (!hasMessages) {
+    state.chat.isCollapsed = false;
+    state.chat.isFullscreen = false;
+  }
   document.body.classList.toggle("has-messages", hasMessages);
   els.heroAskCard?.setAttribute("aria-hidden", hasMessages ? "true" : "false");
   els.followupInputBar?.setAttribute("aria-hidden", hasMessages ? "false" : "true");
@@ -2925,8 +2938,28 @@ function syncVoiceModeUI() {
 
 function toggleChatCollapsed(forceValue) {
   const hasMessages = Boolean(els.conversation?.children.length);
-  if (!isMobileViewport() || !hasMessages) return;
-  state.chat.isCollapsed = typeof forceValue === "boolean" ? forceValue : !state.chat.isCollapsed;
+  if (!isMobileViewport() || !hasMessages || Date.now() - chatDrawerGestureAt < 400) return;
+  if (state.chat.isFullscreen && typeof forceValue !== "boolean") {
+    setChatDrawerMode("half");
+    return;
+  }
+  setChatDrawerMode(
+    typeof forceValue === "boolean"
+      ? (forceValue ? "collapsed" : "half")
+      : (state.chat.isCollapsed ? "half" : "collapsed")
+  );
+}
+
+function toggleChatFullscreen() {
+  const hasMessages = Boolean(els.conversation?.children.length);
+  if (!isMobileViewport() || !hasMessages || Date.now() - chatDrawerGestureAt < 400) return;
+  setChatDrawerMode(state.chat.isFullscreen ? "half" : "fullscreen");
+}
+
+function setChatDrawerMode(mode) {
+  const nextMode = ["collapsed", "half", "fullscreen"].includes(mode) ? mode : "half";
+  state.chat.isCollapsed = nextMode === "collapsed";
+  state.chat.isFullscreen = nextMode === "fullscreen";
   syncChatCollapseUI();
 }
 
@@ -2935,21 +2968,83 @@ function syncChatCollapseUI() {
   const hasMessages = Boolean(els.conversation?.children.length);
   if (!mobile || !hasMessages) {
     state.chat.isCollapsed = false;
+    state.chat.isFullscreen = false;
   }
   const collapsed = mobile && hasMessages && state.chat.isCollapsed;
+  const fullscreen = mobile && hasMessages && state.chat.isFullscreen && !collapsed;
+  const drawerMode = collapsed ? "collapsed" : fullscreen ? "fullscreen" : "half";
   document.body.classList.toggle("chat-collapsed", collapsed);
+  document.body.classList.toggle("chat-fullscreen", fullscreen);
   els.chatPanel?.classList.toggle("is-collapsed", collapsed);
+  els.chatPanel?.classList.toggle("is-fullscreen", fullscreen);
   if (state.map.chatDrawerCollapsed !== collapsed) {
     state.map.chatDrawerCollapsed = collapsed;
     requestMapResize({ settle: true });
   }
+  if (state.map.chatDrawerMode !== drawerMode) {
+    state.map.chatDrawerMode = drawerMode;
+    requestMapResize({ settle: true });
+  }
   if (els.chatPanelToggle) {
     els.chatPanelToggle.setAttribute("aria-expanded", String(!collapsed));
-    els.chatPanelToggle.setAttribute("aria-label", collapsed ? "展开聊天面板" : "收起聊天面板");
+    els.chatPanelToggle.setAttribute(
+      "aria-label",
+      collapsed ? "展开聊天面板" : fullscreen ? "返回半屏并查看地图" : "收起聊天面板"
+    );
+  }
+  if (els.chatPanelFullscreenToggle) {
+    els.chatPanelFullscreenToggle.hidden = collapsed;
+    els.chatPanelFullscreenToggle.setAttribute("aria-pressed", String(fullscreen));
+    els.chatPanelFullscreenToggle.setAttribute("aria-label", fullscreen ? "恢复半屏聊天" : "全屏查看聊天");
+    els.chatPanelFullscreenToggle.setAttribute("title", fullscreen ? "恢复半屏聊天" : "全屏查看聊天");
   }
   if (els.chatPanelHint) {
-    els.chatPanelHint.textContent = collapsed ? "点击展开聊天记录" : "点击收起，把更多空间留给地图";
+    els.chatPanelHint.textContent = collapsed
+      ? "点击展开聊天记录"
+      : fullscreen
+        ? "下拉或点击左侧返回半屏"
+        : "上滑或点击右侧全屏查看";
   }
+}
+
+function bindChatDrawerGestures() {
+  if (!els.chatPanelDragHandle) return;
+  let startY = 0;
+  let tracking = false;
+
+  els.chatPanelDragHandle.addEventListener(
+    "touchstart",
+    (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch || !isMobileViewport() || !els.conversation?.children.length) return;
+      tracking = true;
+      startY = touch.clientY;
+    },
+    { passive: true }
+  );
+
+  els.chatPanelDragHandle.addEventListener(
+    "touchend",
+    (event) => {
+      if (!tracking || !isMobileViewport()) return;
+      tracking = false;
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const deltaY = touch.clientY - startY;
+      if (deltaY <= -36) {
+        chatDrawerGestureAt = Date.now();
+        setChatDrawerMode("fullscreen");
+      } else if (deltaY >= 36 && state.chat.isFullscreen) {
+        chatDrawerGestureAt = Date.now();
+        setChatDrawerMode("half");
+      }
+    },
+    { passive: true }
+  );
+
+  els.chatPanelDragHandle.addEventListener("touchcancel", () => {
+    tracking = false;
+  }, { passive: true });
 }
 
 function micIconMarkup() {
