@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
     <title>高德 AI 地图助手</title>
-    <link rel="stylesheet" href="/styles.css?v=20260711-chat-fallback" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-phase3-local" />
   </head>
   <body>
     <main class="main-dashboard-layout">
@@ -178,11 +178,12 @@
       <section class="favorites-panel" id="favoritesPanel" aria-hidden="true">
         <header class="favorites-panel-header">
           <div>
-            <p class="favorites-panel-eyebrow">Saved Places</p>
+            <p class="favorites-panel-eyebrow">私人地理知识库</p>
             <h2>我的收藏</h2>
           </div>
           <span class="favorites-panel-count" id="favoritesCount">0 个地点</span>
         </header>
+        <div class="favorites-tag-filter" id="favoritesTagFilter" aria-label="收藏标签筛选"></div>
         <div class="favorites-panel-body" id="favoritesList"></div>
       </section>
 
@@ -240,12 +241,19 @@
         <div class="note-sheet-head">
           <div>
             <p class="note-sheet-eyebrow">私人标签</p>
-            <h3 id="favoriteNoteTitle">给这个地点加一句备注</h3>
+            <h3 id="favoriteNoteTitle">完善收藏信息</h3>
           </div>
           <button class="note-sheet-close" id="favoriteNoteCancel" type="button" aria-label="关闭">×</button>
         </div>
         <p class="note-sheet-place" id="favoriteNotePlace"></p>
-        <input id="favoriteNoteInput" type="text" maxlength="60" placeholder="例如：闲鱼有券 10元/小时 / 入口在侧门" />
+        <input id="favoriteNoteInput" type="text" maxlength="60" placeholder="例如：入口在侧门、适合周末来" />
+        <div class="favorite-tag-presets" id="favoriteTagPresets" aria-label="常用私人标签">
+          <button type="button" data-tag="常去">常去</button>
+          <button type="button" data-tag="待探店">待探店</button>
+          <button type="button" data-tag="闲鱼特惠">闲鱼特惠</button>
+          <button type="button" data-tag="10元/小时">10元/小时</button>
+        </div>
+        <input id="favoriteTagsInput" type="text" maxlength="80" placeholder="自定义标签，用逗号分隔" />
         <div class="note-sheet-actions">
           <button class="note-sheet-skip" id="favoriteNoteSkip" type="button">跳过</button>
           <button class="note-sheet-save" id="favoriteNoteSave" type="button">保存收藏</button>
@@ -253,6 +261,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260711-chat-fallback" type="module"></script>
+    <script src="/app.js?v=20260712-phase3-local" type="module"></script>
   </body>
 </html>

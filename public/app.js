@@ -42,6 +42,7 @@ const els = {
   favoritesPanel: $("#favoritesPanel"),
   favoritesList: $("#favoritesList"),
   favoritesCount: $("#favoritesCount"),
+  favoritesTagFilter: $("#favoritesTagFilter"),
   searchPanel: $("#searchPanel"),
   searchPanelForm: $("#searchPanelForm"),
   searchPanelInput: $("#searchPanelInput"),
@@ -50,6 +51,8 @@ const els = {
   favoriteNoteSheet: $("#favoriteNoteSheet"),
   favoriteNotePlace: $("#favoriteNotePlace"),
   favoriteNoteInput: $("#favoriteNoteInput"),
+  favoriteTagsInput: $("#favoriteTagsInput"),
+  favoriteTagPresets: $("#favoriteTagPresets"),
   favoriteNoteSave: $("#favoriteNoteSave"),
   favoriteNoteSkip: $("#favoriteNoteSkip"),
   favoriteNoteCancel: $("#favoriteNoteCancel")
@@ -112,7 +115,8 @@ const state = {
   layers: {
     walkRadius: true,
     pois: true,
-    rankings: true
+    rankings: true,
+    menuOpen: false
   },
   evidenceRows: [],
   evidenceInitialLimit: 6,
@@ -126,6 +130,7 @@ const state = {
     lastRequestId: 0
   },
   favoriteDraft: null,
+  favoriteTagFilter: "",
   favorites: [],
   viewport: {
     stableHeight: 0,
@@ -159,9 +164,14 @@ const mapRuntime = {
     ranking: null,
     poi: null
   },
-  favoritePreview: null,
+  placeMarkers: new Map(),
+  placeRecords: new Map(),
   resizeFrame: 0,
-  resizeTimer: 0
+  resizeTimer: 0,
+  rankingRenderTimer: 0,
+  mapInteractionTimer: 0,
+  cardSelectionFrame: 0,
+  cardSelectionLockUntil: 0
 };
 let guideDismissTimer = 0;
 let searchDebounceTimer = 0;
@@ -286,6 +296,9 @@ function bindEvents() {
   els.conversation?.addEventListener("keydown", handlePlaceCardKeydown);
   els.favoritesList?.addEventListener("keydown", handlePlaceCardKeydown);
   els.searchPanelResults?.addEventListener("keydown", handlePlaceCardKeydown);
+  els.favoritesTagFilter?.addEventListener("click", handleFavoriteTagFilterClick);
+  els.favoriteTagPresets?.addEventListener("click", handleFavoriteTagPresetClick);
+  els.favoriteTagsInput?.addEventListener("input", syncFavoriteTagPresetState);
   els.searchPanelForm?.addEventListener("submit", handleSearchPanelSubmit);
   els.searchPanelInput?.addEventListener("input", handleSearchPanelInput);
   els.favoriteNoteSave?.addEventListener("click", (event) => {
@@ -307,6 +320,7 @@ function bindEvents() {
     if (event.target === els.favoriteNoteSheet) closeFavoriteNoteSheet();
   });
   window.addEventListener("favorites-changed", handleFavoritesChanged);
+  els.conversation?.addEventListener("scroll", scheduleVisiblePlaceSelection, { passive: true });
   bindMobileVoiceHoldEvents();
   bindEvidenceDrawerGestures();
   bindChatDrawerGestures();
@@ -416,12 +430,45 @@ function selectMapPlace(record, source = "") {
   return normalized;
 }
 
+function selectLinkedPlace(record, options = {}) {
+  const normalized = selectMapPlace(record, options.source || "place");
+  const point = parseLocation(normalized.location);
+  if (map && point.length === 2 && point.every(Number.isFinite) && options.pan !== false) {
+    const nextZoom = options.zoom
+      ? Number(options.zoom)
+      : Math.max(Number(map.getZoom?.() || 14), options.keepZoom ? 0 : 15);
+    if (options.keepZoom) map.panTo?.(point);
+    else map.setZoomAndCenter(nextZoom, point);
+  }
+  if (options.openInfo && point.length === 2 && point.every(Number.isFinite)) {
+    openPoiInfo(normalized, point);
+  }
+  if (options.scrollCard) scrollPlaceCardIntoView(normalized.id);
+  return normalized;
+}
+
+function scrollPlaceCardIntoView(placeId) {
+  const id = cleanText(placeId);
+  if (!id) return;
+  const wasCollapsed = isMobileViewport() && state.chat.isCollapsed;
+  mapRuntime.cardSelectionLockUntil = Date.now() + (wasCollapsed ? 1100 : 700);
+  if (wasCollapsed) setChatDrawerMode("half");
+  window.setTimeout(() => {
+    const cards = [...document.querySelectorAll(".place-card.is-clickable[data-poi-id]")];
+    const card = cards.find((item) => cleanText(item.dataset.poiId) === id && item.offsetParent !== null);
+    card?.scrollIntoView?.({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, wasCollapsed ? 340 : 40);
+}
+
 function syncSelectedPlaceUI() {
   document.querySelectorAll(".place-card.is-clickable[data-poi-id]").forEach((card) => {
     const selected = cleanText(card.dataset.poiId) === state.map.selectedPlaceId;
     card.classList.toggle("is-selected", selected);
     if (selected) card.setAttribute("aria-current", "location");
     else card.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-place-id]").forEach((markerElement) => {
+    markerElement.classList.toggle("is-selected", cleanText(markerElement.dataset.placeId) === state.map.selectedPlaceId);
   });
 }
 
@@ -670,19 +717,7 @@ function renderRankingLayer() {
     addMapOverlay("walkRadius", circle);
   }
 
-  mapEntries.forEach((entry) => {
-    if (!entry.location) return;
-    const point = parseLocation(entry.location);
-    const marker = new window.AMap.Marker({
-      position: point,
-      content: rankingMarkerContent(entry),
-      offset: new window.AMap.Pixel(-16, -34),
-      anchor: "bottom-center",
-      zIndex: 80
-    });
-    marker.on("click", () => openRankingInfo(entry, marker.getPosition()));
-    addMapOverlay("rankings", marker);
-  });
+  rankingEntriesForViewport(mapEntries).forEach(addRankingMarker);
 
   state.map.bounds = [];
   renderMapLegend();
@@ -759,7 +794,64 @@ function syncRankingToolbarVisibility() {
   if (toolbar) toolbar.hidden = !hasRankingDataForCurrentCity();
 }
 
-function rankingMarkerContent(entry) {
+function rankingEntriesForViewport(entries) {
+  if (!map || !Array.isArray(entries)) return [];
+  const center = map.getCenter?.();
+  const centerPoint = [
+    Number(center?.getLng?.() ?? center?.lng),
+    Number(center?.getLat?.() ?? center?.lat)
+  ];
+  const zoom = Number(map.getZoom?.() || 11);
+  const radiusByZoom = zoom <= 11 ? 32000 : zoom <= 12 ? 18000 : zoom <= 13 ? 10000 : zoom <= 14 ? 5600 : zoom <= 15 ? 3000 : 1800;
+  const limit = isMobileViewport()
+    ? (zoom <= 11 ? 42 : zoom <= 13 ? 56 : zoom <= 14 ? 64 : 80)
+    : (zoom <= 11 ? 90 : zoom <= 13 ? 140 : 180);
+  const ranked = entries
+    .filter((entry) => entry?.location)
+    .map((entry) => ({
+      entry,
+      distanceMeters: centerPoint.every(Number.isFinite)
+        ? distanceBetweenPoints(centerPoint, parseLocation(entry.location))
+        : Number.POSITIVE_INFINITY,
+      priority: entry.rankingCategory === "multi" ? 1 : 0
+    }))
+    .sort((left, right) => right.priority - left.priority || left.distanceMeters - right.distanceMeters);
+  const nearby = ranked.filter((item) => item.distanceMeters <= radiusByZoom);
+  return (nearby.length ? nearby : ranked).slice(0, limit).map((item) => item.entry);
+}
+
+function scheduleRankingViewportRender() {
+  if (!map || !hasRankingDataForCurrentCity() || !state.rankings.markers.length) return;
+  window.clearTimeout(mapRuntime.rankingRenderTimer);
+  mapRuntime.rankingRenderTimer = window.setTimeout(() => {
+    clearRankingOverlays();
+    const entries = filterRankingMarkers(state.rankings.markers);
+    rankingEntriesForViewport(entries).forEach(addRankingMarker);
+    applyLayerVisibility();
+    syncSelectedPlaceUI();
+  }, 90);
+}
+
+function addRankingMarker(entry) {
+  if (!entry?.location || !window.AMap) return;
+  const point = parseLocation(entry.location);
+  const record = favoriteRecordFromRankingEntry(entry);
+  const marker = new window.AMap.Marker({
+    position: point,
+    content: rankingMarkerContent(entry, record.id),
+    offset: new window.AMap.Pixel(-16, -34),
+    anchor: "bottom-center",
+    zIndex: 80
+  });
+  marker.on("click", () => {
+    openRankingInfo(entry, marker.getPosition());
+    selectLinkedPlace(record, { source: "ranking-marker", scrollCard: true });
+  });
+  addMapOverlay("rankings", marker);
+  registerPlaceMarker(record, marker, "rankings");
+}
+
+function rankingMarkerContent(entry, placeId = "") {
   const badges = (entry.categories || []).slice(0, 3).map((key) => {
     const src =
       key === "bichibang"
@@ -772,7 +864,7 @@ function rankingMarkerContent(entry) {
   });
 
   return `
-    <div class="ranking-marker ranking-${escapeHtml(entry.rankingCategory || "single")}">
+    <div class="ranking-marker ranking-${escapeHtml(entry.rankingCategory || "single")}" data-place-id="${escapeHtml(placeId)}">
       <div class="ranking-marker-badges">${badges.join("")}</div>
       <div class="ranking-marker-pin"></div>
     </div>
@@ -865,9 +957,31 @@ async function initMap() {
 
 function bindViewportRankingDiscovery() {
   if (!map) return;
+  ["dragstart", "movestart", "zoomstart"].forEach((eventName) => map.on(eventName, beginMapInteraction));
   map.on("dragend", handleMapViewportChange);
-  map.on("moveend", syncMapViewportState);
-  map.on("zoomend", syncMapViewportState);
+  map.on("moveend", () => {
+    syncMapViewportState();
+    endMapInteraction();
+  });
+  map.on("zoomend", () => {
+    syncMapViewportState();
+    scheduleRankingViewportRender();
+    endMapInteraction();
+  });
+}
+
+function beginMapInteraction() {
+  window.clearTimeout(mapRuntime.mapInteractionTimer);
+  if (state.layers.menuOpen) {
+    state.layers.menuOpen = false;
+    renderLayerToggles();
+  }
+  document.body.classList.add("map-interacting");
+}
+
+function endMapInteraction() {
+  window.clearTimeout(mapRuntime.mapInteractionTimer);
+  mapRuntime.mapInteractionTimer = window.setTimeout(() => document.body.classList.remove("map-interacting"), 80);
 }
 
 async function handleMapViewportChange() {
@@ -888,6 +1002,7 @@ async function handleMapViewportChange() {
       if (wasAlreadyBrowsingShanghai) {
         renderRankingEvidence(rankingEvidenceEntries());
         if (els.mapTitle) els.mapTitle.textContent = `上海三榜餐厅 · ${filterRankingMarkers(state.rankings.markers).length} 家`;
+        scheduleRankingViewportRender();
       } else {
         renderRankingLayer();
       }
@@ -1125,17 +1240,24 @@ function renderNearbyMap(payload) {
   pois.slice(0, 10).forEach((poi, index) => {
     if (!poi.location) return;
     const point = parseLocation(poi.location);
+    const record = favoriteRecordFromPoi(poi);
     bounds.push(point);
     const marker = new window.AMap.Marker({
       position: point,
       title: poi.name,
       label: {
-        content: `<div class="map-label cluster">${index + 1}</div>`,
+        content: `<div class="map-label cluster" data-place-id="${escapeHtml(record.id)}">${index + 1}</div>`,
         direction: "top"
       }
     });
-    marker.on("click", () => openPoiInfo(poi, point));
+    marker.on("click", () => selectLinkedPlace(record, {
+      source: "nearby-marker",
+      openInfo: true,
+      keepZoom: true,
+      scrollCard: true
+    }));
     addMapOverlay("pois", marker);
+    registerPlaceMarker(record, marker, "pois");
   });
 
   state.map.bounds = bounds;
@@ -1342,6 +1464,18 @@ function favoriteRecordFromPoi(poi) {
   return record;
 }
 
+function favoriteRecordFromRankingEntry(entry) {
+  return normalizeFavoriteRecord({
+    id: cleanText(entry?.id) || favoriteIdFromRecord({ name: entry?.name, address: entry?.address }),
+    name: entry?.name,
+    address: [entry?.district, entry?.area, entry?.address].filter(Boolean).join(" "),
+    location: entry?.location,
+    type: entry?.cuisine || "餐饮",
+    rankingLabels: Array.isArray(entry?.labels) ? entry.labels : [],
+    source: "榜单地点"
+  });
+}
+
 function isFavoriteId(id) {
   return state.favorites.some((favorite) => favorite.id === id);
 }
@@ -1380,7 +1514,7 @@ function saveFavoriteRecord(record, note = "") {
   const merged = normalizeFavoriteRecord({
     ...existing,
     ...normalized,
-    tags: normalized.tags.length ? normalized.tags : existing?.tags,
+    tags: normalized.tags,
     createdAt: existing?.createdAt || existing?.savedAt || normalized.createdAt,
     updatedAt: new Date().toISOString()
   });
@@ -1393,7 +1527,8 @@ function saveFavoriteRecord(record, note = "") {
 }
 
 function favoriteMetaLine(record) {
-  return [cleanText(record.address), formatDistance(record.distance), cleanText(record.type)].filter(Boolean).join(" · ");
+  const distance = cleanText(record.distance) ? formatDistance(record.distance) : "";
+  return [cleanText(record.address), distance, cleanText(record.type)].filter(Boolean).join(" · ");
 }
 
 function favoriteHeartIcon(isFaved) {
@@ -1427,15 +1562,66 @@ function favoriteNoteMarkup(record) {
   return `<div class="favorite-note">${escapeHtml(note)}</div>`;
 }
 
+function favoriteTagsMarkup(record) {
+  const tags = [...new Set([...(record?.tags || []), ...(record?.rankingLabels || [])].map(cleanText).filter(Boolean))];
+  if (!tags.length) return "";
+  return `<div class="favorite-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
+}
+
+function favoriteEditButtonMarkup(record) {
+  const payload = escapeHtml(encodeURIComponent(JSON.stringify(normalizeFavoriteRecord(record))));
+  return `
+    <button class="favorite-edit-btn" type="button" aria-label="编辑收藏信息" title="编辑收藏信息" data-favorite="${payload}">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M13.5 6.5 17.5 10.5M5 19l3.6-.7L18.4 8.5a2.1 2.1 0 0 0-3-3L5.7 15.2Z" />
+      </svg>
+    </button>
+  `;
+}
+
+function favoriteTagList() {
+  return [...new Set(state.favorites.flatMap((favorite) => favorite.tags || []).map(cleanText).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function renderFavoriteTagFilter() {
+  if (!els.favoritesTagFilter) return;
+  const tags = favoriteTagList();
+  if (state.favoriteTagFilter && !tags.includes(state.favoriteTagFilter)) state.favoriteTagFilter = "";
+  els.favoritesTagFilter.hidden = !tags.length;
+  els.favoritesTagFilter.innerHTML = tags.length
+    ? ["", ...tags].map((tag) => `
+        <button type="button" class="favorite-tag-filter-btn${state.favoriteTagFilter === tag ? " is-active" : ""}" data-tag="${escapeHtml(tag)}">
+          ${escapeHtml(tag || "全部")}
+        </button>
+      `).join("")
+    : "";
+}
+
+function handleFavoriteTagFilterClick(event) {
+  const button = event.target instanceof Element ? event.target.closest("button[data-tag]") : null;
+  if (!button) return;
+  state.favoriteTagFilter = cleanText(button.dataset.tag);
+  renderFavoritesPanel();
+}
+
 function renderFavoritesPanel() {
   if (!els.favoritesList) return;
-  const orderedFavorites = [...state.favorites].sort((left, right) => {
+  renderFavoriteTagFilter();
+  const allFavorites = [...state.favorites].sort((left, right) => {
     const noteDelta = Number(Boolean(cleanText(right.note || right.userNote))) - Number(Boolean(cleanText(left.note || left.userNote)));
     if (noteDelta) return noteDelta;
     return String(right.updatedAt || right.savedAt || "").localeCompare(String(left.updatedAt || left.savedAt || ""));
   });
-  const count = orderedFavorites.length;
-  if (els.favoritesCount) els.favoritesCount.textContent = `${count} 个地点`;
+  const orderedFavorites = state.favoriteTagFilter
+    ? allFavorites.filter((favorite) => (favorite.tags || []).includes(state.favoriteTagFilter))
+    : allFavorites;
+  const count = allFavorites.length;
+  if (els.favoritesCount) {
+    els.favoritesCount.textContent = state.favoriteTagFilter
+      ? `${orderedFavorites.length} / ${count} 个地点`
+      : `${count} 个地点`;
+  }
 
   if (!count) {
     els.favoritesList.innerHTML = `
@@ -1452,19 +1638,32 @@ function renderFavoritesPanel() {
     return;
   }
 
+  if (!orderedFavorites.length) {
+    els.favoritesList.innerHTML = `
+      <div class="fav-empty">
+        <div>
+          <strong>这个标签下还没有地点</strong>
+          <p>编辑收藏信息后可添加或调整私人标签</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
   els.favoritesList.innerHTML = `
       <div class="favorites-card-list">
       ${orderedFavorites
         .map(
           (favorite, index) => `
-            <article class="place-card place-card--favorite is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+            <article class="place-card place-card--favorite is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}" data-place-id="${escapeHtml(favorite.id)}" data-place-record="${escapeHtml(encodeURIComponent(JSON.stringify(favorite)))}">
               <div class="place-photo place-photo-rank">${index + 1}</div>
               <div class="place-card-main">
                 <strong>${escapeHtml(favorite.name)}</strong>
                 <span class="place-inline-meta">${escapeHtml(favoriteMetaLine(favorite))}</span>
                 ${favoriteNoteMarkup(favorite)}
-                <div class="place-badges">${(favorite.rankingLabels || []).map((label) => `<span>${escapeHtml(label)}</span>`).join("")}</div>
+                ${favoriteTagsMarkup(favorite)}
               </div>
+              ${favoriteEditButtonMarkup(favorite)}
               ${favoriteButtonMarkup(favorite)}
             </article>
           `
@@ -1532,9 +1731,10 @@ function renderSearchPanel() {
 
 function searchResultCard(poi) {
   const favorite = favoriteRecordFromPoi(poi);
+  mapRuntime.placeRecords.set(favorite.id, favorite);
   const labels = [poi?.type, poi?.distance ? formatDistance(poi.distance) : ""].filter(Boolean).slice(0, 2);
   return `
-    <article class="place-card search-result-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+    <article class="place-card search-result-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}" data-place-id="${escapeHtml(favorite.id)}" data-place-record="${escapeHtml(encodeURIComponent(JSON.stringify(favorite)))}">
       <div class="place-photo"></div>
       <div class="place-card-main">
         <strong>${escapeHtml(poi?.name || "地点")}</strong>
@@ -1627,21 +1827,33 @@ function renderLayerToggles() {
   mapWrap.querySelector(".layer-toggles")?.remove();
 
   const container = document.createElement("div");
-  container.className = "layer-toggles";
+  container.className = `layer-toggles${state.layers.menuOpen ? " is-open" : ""}`;
   container.innerHTML = `
-    <button class="layer-toggle ${state.layers.walkRadius ? "" : "is-hidden"}" type="button" data-layer="walkRadius">
-      ${state.layers.walkRadius ? "◎" : "○"} 步行范围
+    <button class="layer-menu-toggle" type="button" aria-expanded="${state.layers.menuOpen}" aria-label="地图图层" title="地图图层">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m12 3-8 4.5 8 4.5 8-4.5Z" />
+        <path d="m4 12 8 4.5 8-4.5M4 16.5 12 21l8-4.5" />
+      </svg>
     </button>
-    <button class="layer-toggle ${state.layers.pois ? "" : "is-hidden"}" type="button" data-layer="pois">
-      ${state.layers.pois ? "◎" : "○"} 美食/店铺
-    </button>
-    <button class="layer-toggle ${state.layers.rankings ? "" : "is-hidden"}" type="button" data-layer="rankings">
-      ${state.layers.rankings ? "◎" : "○"} 全部榜单
-    </button>
+    <div class="layer-menu" aria-label="地图图层开关" aria-hidden="${!state.layers.menuOpen}">
+      <button class="layer-toggle ${state.layers.walkRadius ? "" : "is-hidden"}" type="button" data-layer="walkRadius" tabindex="${state.layers.menuOpen ? "0" : "-1"}">
+        ${state.layers.walkRadius ? "◎" : "○"} 步行范围
+      </button>
+      <button class="layer-toggle ${state.layers.pois ? "" : "is-hidden"}" type="button" data-layer="pois" tabindex="${state.layers.menuOpen ? "0" : "-1"}">
+        ${state.layers.pois ? "◎" : "○"} 美食/店铺
+      </button>
+      <button class="layer-toggle ${state.layers.rankings ? "" : "is-hidden"}" type="button" data-layer="rankings" tabindex="${state.layers.menuOpen ? "0" : "-1"}">
+        ${state.layers.rankings ? "◎" : "○"} 全部榜单
+      </button>
+    </div>
   `;
 
+  container.querySelector(".layer-menu-toggle")?.addEventListener("click", () => {
+    state.layers.menuOpen = !state.layers.menuOpen;
+    renderLayerToggles();
+  });
   container.querySelectorAll("button").forEach((button) => {
-    button.addEventListener("click", () => toggleLayer(button.dataset.layer));
+    if (button.dataset.layer) button.addEventListener("click", () => toggleLayer(button.dataset.layer));
   });
 
   mapWrap.appendChild(container);
@@ -1676,12 +1888,19 @@ function addMapOverlay(layerKey, overlay) {
   overlay.setMap(isLayerVisible(layerKey) ? map : null);
 }
 
-function removeOverlayReference(overlay) {
-  if (!overlay) return;
-  mapRuntime.overlays.base = mapRuntime.overlays.base.filter((item) => item !== overlay);
-  mapRuntime.overlays.walkRadius = mapRuntime.overlays.walkRadius.filter((item) => item !== overlay);
-  mapRuntime.overlays.pois = mapRuntime.overlays.pois.filter((item) => item !== overlay);
-  mapRuntime.overlays.rankings = mapRuntime.overlays.rankings.filter((item) => item !== overlay);
+function registerPlaceMarker(record, marker, layer = "pois") {
+  const normalized = normalizeFavoriteRecord(record);
+  if (!normalized.id || !marker) return;
+  mapRuntime.placeMarkers.set(normalized.id, { marker, layer });
+  mapRuntime.placeRecords.set(normalized.id, normalized);
+}
+
+function unregisterPlaceMarkers(layer = "") {
+  for (const [id, entry] of mapRuntime.placeMarkers.entries()) {
+    if (layer && entry.layer !== layer) continue;
+    mapRuntime.placeMarkers.delete(id);
+    if (!state.favorites.some((favorite) => favorite.id === id)) mapRuntime.placeRecords.delete(id);
+  }
 }
 
 function visibleMapOverlays() {
@@ -1701,6 +1920,15 @@ function applyLayerVisibility() {
 }
 
 function decodeFavoritePayload(raw) {
+  if (!raw) return null;
+  try {
+    return normalizeFavoriteRecord(JSON.parse(decodeURIComponent(raw)));
+  } catch {
+    return null;
+  }
+}
+
+function decodePlaceRecord(raw) {
   if (!raw) return null;
   try {
     return normalizeFavoriteRecord(JSON.parse(decodeURIComponent(raw)));
@@ -1729,17 +1957,6 @@ function pulseFavoriteButton(button) {
   window.setTimeout(() => button.classList.remove("is-popping"), 240);
 }
 
-function clearFavoritePreview() {
-  if (!mapRuntime.favoritePreview) return;
-  try {
-    mapRuntime.favoritePreview.setMap?.(null);
-  } catch {
-    // ignore map cleanup failure
-  }
-  removeOverlayReference(mapRuntime.favoritePreview);
-  mapRuntime.favoritePreview = null;
-}
-
 function openFavoriteNoteSheet(record) {
   state.favoriteDraft = normalizeFavoriteRecord(record);
   if (els.favoriteNotePlace) {
@@ -1748,10 +1965,14 @@ function openFavoriteNoteSheet(record) {
   if (els.favoriteNoteInput) {
     els.favoriteNoteInput.value = state.favoriteDraft.userNote || "";
   }
+  if (els.favoriteTagsInput) {
+    els.favoriteTagsInput.value = (state.favoriteDraft.tags || []).join("，");
+  }
   if (els.favoriteNoteSheet) {
     els.favoriteNoteSheet.hidden = false;
     els.favoriteNoteSheet.setAttribute("aria-hidden", "false");
   }
+  syncFavoriteTagPresetState();
   requestAnimationFrame(() => els.favoriteNoteInput?.focus());
 }
 
@@ -1764,6 +1985,30 @@ function closeFavoriteNoteSheet() {
   if (els.favoriteNoteInput) {
     els.favoriteNoteInput.value = "";
   }
+  if (els.favoriteTagsInput) els.favoriteTagsInput.value = "";
+  syncFavoriteTagPresetState();
+}
+
+function parseFavoriteTags(value) {
+  return [...new Set(String(value || "").split(/[，,、]/).map(cleanText).filter(Boolean))].slice(0, 8);
+}
+
+function handleFavoriteTagPresetClick(event) {
+  const button = event.target instanceof Element ? event.target.closest("button[data-tag]") : null;
+  if (!button || !els.favoriteTagsInput) return;
+  const tag = cleanText(button.dataset.tag);
+  const tags = parseFavoriteTags(els.favoriteTagsInput.value);
+  const nextTags = tags.includes(tag) ? tags.filter((item) => item !== tag) : [...tags, tag];
+  els.favoriteTagsInput.value = nextTags.join("，");
+  syncFavoriteTagPresetState();
+}
+
+function syncFavoriteTagPresetState() {
+  const selected = new Set(parseFavoriteTags(els.favoriteTagsInput?.value));
+  els.favoriteTagPresets?.querySelectorAll("button[data-tag]").forEach((button) => {
+    button.classList.toggle("is-active", selected.has(cleanText(button.dataset.tag)));
+    button.setAttribute("aria-pressed", String(selected.has(cleanText(button.dataset.tag))));
+  });
 }
 
 function commitFavoriteDraft(withNote) {
@@ -1772,28 +2017,15 @@ function commitFavoriteDraft(withNote) {
     return;
   }
   const note = withNote ? cleanText(els.favoriteNoteInput?.value) : "";
-  saveFavoriteRecord({ ...state.favoriteDraft, savedSource: state.activeView === "search" ? "搜索收藏" : "对话收藏" }, note);
+  const tags = withNote ? parseFavoriteTags(els.favoriteTagsInput?.value) : state.favoriteDraft.tags || [];
+  saveFavoriteRecord({
+    ...state.favoriteDraft,
+    tags,
+    savedSource: state.activeView === "search" ? "搜索收藏" : "对话收藏"
+  }, note);
   closeFavoriteNoteSheet();
   syncFavoriteButtons();
   showToast(note ? "已收藏并写入私人备注" : "已加入收藏");
-}
-
-function focusFavoriteOnMap(record) {
-  const point = parseLocation(record?.location);
-  if (!map || point.length !== 2 || !point.every(Number.isFinite)) {
-    showToast("这个收藏地点暂时没有可用坐标");
-    return;
-  }
-
-  clearFavoritePreview();
-  mapRuntime.favoritePreview = new window.AMap.Marker({
-    position: point,
-    title: record?.name || "收藏地点",
-    content: `<div class="map-favorite-star" aria-hidden="true">★</div>`
-  });
-  addMapOverlay("base", mapRuntime.favoritePreview);
-  selectMapPlace(record, "favorite");
-  map.setZoomAndCenter(Math.max(Number(map.getZoom?.() || 15), 15), point);
 }
 
 function handlePlaceCardInteraction(event) {
@@ -1803,6 +2035,15 @@ function handlePlaceCardInteraction(event) {
     event.stopPropagation();
     const question = suggestionChip.dataset.question || suggestionChip.textContent || "";
     if (question.trim()) void handleSuggestedQuestion(question.trim());
+    return;
+  }
+
+  const editButton = event.target instanceof Element ? event.target.closest(".favorite-edit-btn") : null;
+  if (editButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const record = decodeFavoritePayload(editButton.dataset.favorite);
+    if (record) openFavoriteNoteSheet(record);
     return;
   }
 
@@ -1826,16 +2067,38 @@ function handlePlaceCardInteraction(event) {
 
   const card = event.target instanceof Element ? event.target.closest(".place-card.is-clickable") : null;
   if (!card) return;
-  const record = normalizeFavoriteRecord({
-    id: card.dataset.poiId,
-    location: card.dataset.location,
-    name: card.querySelector("strong")?.textContent || "地点",
-    address: card.querySelector(".place-inline-meta")?.textContent || ""
-  });
+  const record = decodePlaceRecord(card.dataset.placeRecord) || mapRuntime.placeRecords.get(cleanText(card.dataset.poiId)) || normalizeFavoriteRecord({
+      id: card.dataset.poiId,
+      location: card.dataset.location,
+      name: card.querySelector("strong")?.textContent || "地点",
+      address: card.querySelector(".place-inline-meta")?.textContent || ""
+    });
   if (state.activeView === "favorites" || state.activeView === "search") {
     setActiveView("chat");
+    requestMapResize({ settle: true });
   }
-  focusFavoriteOnMap(record);
+  requestAnimationFrame(() => selectLinkedPlace(record, {
+    source: "place-card",
+    openInfo: true,
+    zoom: 15
+  }));
+}
+
+function scheduleVisiblePlaceSelection() {
+  if (mapRuntime.cardSelectionFrame || state.activeView !== "chat" || Date.now() < mapRuntime.cardSelectionLockUntil) return;
+  mapRuntime.cardSelectionFrame = window.requestAnimationFrame(() => {
+    mapRuntime.cardSelectionFrame = 0;
+    const conversationRect = els.conversation?.getBoundingClientRect();
+    if (!conversationRect) return;
+    const centerY = conversationRect.top + conversationRect.height / 2;
+    const visibleCards = [...els.conversation.querySelectorAll(".place-card.is-clickable[data-poi-id]")]
+      .map((card) => ({ card, rect: card.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.bottom > conversationRect.top + 24 && rect.top < conversationRect.bottom - 24)
+      .sort((left, right) => Math.abs((left.rect.top + left.rect.bottom) / 2 - centerY) - Math.abs((right.rect.top + right.rect.bottom) / 2 - centerY));
+    const id = cleanText(visibleCards[0]?.card?.dataset?.poiId);
+    const record = mapRuntime.placeRecords.get(id);
+    if (record && id !== state.map.selectedPlaceId) selectMapPlace(record, "card-scroll");
+  });
 }
 
 function handlePlaceCardKeydown(event) {
@@ -2186,7 +2449,7 @@ function appendAnswer(payload, options = {}) {
 function buildAnswerCards(payload) {
   const pois = payload?.data?.pois || [];
   if (Array.isArray(pois) && pois.length) {
-    const limit = payload?.intent === "search" ? 3 : (isMobileViewport() ? 2 : 4);
+    const limit = isMobileViewport() ? 6 : 8;
     return `<div class="answer-list">${pois.slice(0, limit).map((poi) => placeCard(poi)).join("")}</div>`;
   }
 
@@ -2212,8 +2475,10 @@ function placeCard(poi) {
   const distance = poi?.distance ? `${poi.distance}m` : "";
   const labels = poi?.rankingLabels?.length ? poi.rankingLabels : [state.filters.category].filter(Boolean);
   const favorite = favoriteRecordFromPoi(poi);
+  mapRuntime.placeRecords.set(favorite.id, favorite);
+  const recordPayload = escapeHtml(encodeURIComponent(JSON.stringify(favorite)));
   return `
-    <article class="place-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}">
+    <article class="place-card is-clickable" role="button" tabindex="0" data-location="${escapeHtml(favorite.location)}" data-poi-id="${escapeHtml(favorite.id)}" data-place-id="${escapeHtml(favorite.id)}" data-place-record="${recordPayload}">
       <div class="place-photo"></div>
       <div class="place-card-main">
         <strong>${escapeHtml(name)}</strong>
@@ -2428,20 +2693,32 @@ function renderAgentMap(payload) {
   (payload.map.markers || []).forEach((item) => {
     if (!item.location) return;
     const point = parseLocation(item.location);
+    const record = favoriteRecordFromPoi({
+      ...item,
+      name: item.title,
+      id: item.id,
+      location: item.location
+    });
     bounds.push(point);
     const marker = new window.AMap.Marker({
       position: point,
       title: item.title,
       label: {
-        content: `<div class="map-label ${markerClass(item.rankingCategory, item.role)}">${escapeHtml(item.label || "")}</div>`,
+        content: `<div class="map-label ${markerClass(item.rankingCategory, item.role)}"${item.role === "origin" || item.role === "destination" ? "" : ` data-place-id="${escapeHtml(record.id)}"`}>${escapeHtml(item.label || "")}</div>`,
         direction: "top"
       }
     });
     if (item.role === "origin" || item.role === "destination") {
       addMapOverlay("base", marker);
     } else {
-      marker.on("click", () => openPoiInfo(item, point));
+      marker.on("click", () => selectLinkedPlace(record, {
+        source: "agent-marker",
+        openInfo: true,
+        keepZoom: true,
+        scrollCard: true
+      }));
       addMapOverlay("pois", marker);
+      registerPlaceMarker(record, marker, "pois");
     }
   });
 
@@ -2564,6 +2841,7 @@ function numericDistance(distance) {
 }
 
 function formatDistance(distance) {
+  if (!cleanText(distance)) return "-";
   const meters = Number(distance);
   if (!Number.isFinite(meters)) return "-";
   if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}km`;
@@ -2973,6 +3251,10 @@ function syncChatCollapseUI() {
   const collapsed = mobile && hasMessages && state.chat.isCollapsed;
   const fullscreen = mobile && hasMessages && state.chat.isFullscreen && !collapsed;
   const drawerMode = collapsed ? "collapsed" : fullscreen ? "fullscreen" : "half";
+  if (collapsed && state.layers.menuOpen) {
+    state.layers.menuOpen = false;
+    renderLayerToggles();
+  }
   document.body.classList.toggle("chat-collapsed", collapsed);
   document.body.classList.toggle("chat-fullscreen", fullscreen);
   els.chatPanel?.classList.toggle("is-collapsed", collapsed);
@@ -3162,20 +3444,36 @@ function renderMapLegend() {
 
 function openPoiInfo(poi, point) {
   if (!mapRuntime.infoWindows.poi || !map) return;
+  const record = favoriteRecordFromPoi({ ...poi, location: pointToString(point) });
+  const isFaved = isFavoriteId(record.id);
   mapRuntime.infoWindows.poi.setContent(`
     <div class="poi-info-window">
       <strong>${escapeHtml(poi?.name || "地点")}</strong>
       <p>${escapeHtml([poi?.district, poi?.area, poi?.address].filter(Boolean).join(" · "))}</p>
       <p>${poi?.distance ? `距离约 ${escapeHtml(formatDistance(poi.distance))}` : ""}</p>
+      <button class="poi-info-fav-btn${isFaved ? " is-faved" : ""}" type="button" data-favorite="${escapeHtml(encodeURIComponent(JSON.stringify(record)))}">
+        ${favoriteHeartIcon(isFaved)}
+        <span>${isFaved ? "已收藏" : "收藏"}</span>
+      </button>
     </div>
   `);
   mapRuntime.infoWindows.poi.open(map, point);
-  selectMapPlace({
-    id: cleanText(poi?.id || poi?.poiId),
-    name: poi?.name,
-    address: [poi?.district, poi?.area, poi?.address].filter(Boolean).join(" "),
-    location: point
-  }, "poi");
+  window.setTimeout(() => {
+    const button = document.querySelector(".poi-info-fav-btn");
+    if (!button) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const favorite = decodeFavoritePayload(button.dataset.favorite);
+      if (!favorite) return;
+      if (isFavoriteId(favorite.id)) {
+        toggleFavoriteRecord(favorite);
+        showToast("已取消收藏");
+      } else {
+        openFavoriteNoteSheet(favorite);
+      }
+      mapRuntime.infoWindows.poi.close();
+    }, { once: true });
+  }, 40);
 }
 
 function legendPinSvg() {
@@ -3205,7 +3503,9 @@ function clearMap() {
   mapRuntime.overlays.walkRadius = [];
   mapRuntime.overlays.pois = [];
   mapRuntime.overlays.rankings = [];
-  mapRuntime.favoritePreview = null;
+  unregisterPlaceMarkers("base");
+  unregisterPlaceMarkers("pois");
+  unregisterPlaceMarkers("rankings");
   mapRuntime.infoWindows.poi?.close?.();
   mapRuntime.infoWindows.ranking?.close?.();
   state.map.selectedPlaceId = "";
@@ -3216,6 +3516,7 @@ function clearMap() {
 function clearFavoriteMarkers() {
   mapRuntime.overlays.favorites.forEach((overlay) => overlay.setMap?.(null));
   mapRuntime.overlays.favorites = [];
+  unregisterPlaceMarkers("favorites");
 }
 
 function renderFavoriteMarkers() {
@@ -3229,17 +3530,25 @@ function renderFavoriteMarkers() {
       title: record.name || "收藏地点",
       anchor: "bottom-center",
       offset: new window.AMap.Pixel(0, 0),
-      content: `<div class="map-favorite-star" title="${escapeHtml(record.name || "收藏地点")}">★</div>`
+      content: `<div class="map-favorite-star" data-place-id="${escapeHtml(record.id)}" title="${escapeHtml(record.name || "收藏地点")}">★</div>`
     });
-    marker.on("click", () => focusFavoriteOnMap(record));
+    marker.on("click", () => selectLinkedPlace(record, {
+      source: "favorite-marker",
+      openInfo: true,
+      keepZoom: true,
+      scrollCard: true
+    }));
     mapRuntime.overlays.favorites.push(marker);
     marker.setMap(map);
+    registerPlaceMarker(record, marker, "favorites");
   });
+  syncSelectedPlaceUI();
 }
 
 function clearRankingOverlays() {
   mapRuntime.overlays.rankings.forEach((overlay) => overlay.setMap?.(null));
   mapRuntime.overlays.rankings = [];
+  unregisterPlaceMarkers("rankings");
   mapRuntime.infoWindows.ranking?.close?.();
 }
 

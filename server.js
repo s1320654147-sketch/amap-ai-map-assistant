@@ -1101,11 +1101,14 @@ function cleanupPlace(value) {
 
 function poiToMarker(poi, label) {
   return {
+    id: poi.id,
     label,
     title: poi.name,
     address: [poi.district, poi.address].filter(Boolean).join(" "),
     location: poi.location,
     type: poi.type,
+    city: poi.city,
+    district: poi.district,
     distance: poi.distance,
     rankingCategory: poi.rankingCategory || "",
     rankingLabels: poi.rankingLabels || []
