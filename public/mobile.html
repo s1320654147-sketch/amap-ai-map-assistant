@@ -4,9 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>高德 AI 地图助手 - Mobile</title>
-    <link rel="stylesheet" href="/styles.css?v=20260712-ranking-settled" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-phase4-stable" />
   </head>
   <body class="mobile-page">
+    <div class="app-status-banner" id="appStatusBanner" role="status" aria-live="polite" hidden>
+      <span class="app-status-banner-dot" aria-hidden="true"></span>
+      <span id="appStatusBannerText"></span>
+      <button id="appStatusBannerAction" type="button" hidden>重试</button>
+    </div>
     <main class="mobile-shell">
       <header class="mobile-top">
         <div class="mobile-brand-block">
@@ -107,6 +112,6 @@
       </footer>
     </main>
 
-    <script src="/app.js?v=20260712-ranking-settled" type="module"></script>
+    <script src="/app.js?v=20260712-phase4-stable" type="module"></script>
   </body>
 </html>

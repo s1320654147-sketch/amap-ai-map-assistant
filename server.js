@@ -49,7 +49,7 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     sendJson(res, 500, {
       ok: false,
-      error: error instanceof Error ? error.message : "未知错误"
+      error: publicErrorMessage(error)
     });
   }
 });
@@ -2100,6 +2100,15 @@ function productErrorMessage(error) {
   return "这次查询没有稳定完成。";
 }
 
+function publicErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/请输入|缺少参数|请求内容太大|JSON 格式不正确/.test(raw)) return raw;
+  if (/DEEPSEEK|规划|总结|AI/i.test(raw)) return "AI 服务暂时不稳定，请稍后重试。";
+  if (/AMAP|高德|地图|POI|地理编码|路径/i.test(raw)) return "地图服务暂时不稳定，请稍后重试。";
+  if (/超时|fetch failed|网络|HTTP 5|502|503|504/i.test(raw)) return "网络或服务暂时不稳定，请稍后重试。";
+  return "服务暂时不可用，请稍后重试。";
+}
+
 function shouldFallbackNearbyKeyword(keywords) {
   return /本帮菜|上海菜|沪菜|江浙菜|杭帮菜|淮扬菜|粤菜|川菜|湘菜|火锅|烧烤|日料|日本料理|西餐|brunch|早午餐|餐饮|美食|餐厅/i.test(String(keywords || ""));
 }
@@ -2900,7 +2909,10 @@ function textOrEmpty(value) {
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
   res.end(JSON.stringify(payload, null, 2));
 }
 
@@ -2913,6 +2925,7 @@ function setupSse(res) {
 }
 
 function writeSse(res, event, payload) {
+  if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }

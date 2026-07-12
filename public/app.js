@@ -55,7 +55,10 @@ const els = {
   favoriteTagPresets: $("#favoriteTagPresets"),
   favoriteNoteSave: $("#favoriteNoteSave"),
   favoriteNoteSkip: $("#favoriteNoteSkip"),
-  favoriteNoteCancel: $("#favoriteNoteCancel")
+  favoriteNoteCancel: $("#favoriteNoteCancel"),
+  appStatusBanner: $("#appStatusBanner"),
+  appStatusBannerText: $("#appStatusBannerText"),
+  appStatusBannerAction: $("#appStatusBannerAction")
 };
 
 const FILTERS = {
@@ -91,7 +94,8 @@ const state = {
     summary: "",
     isAsking: false,
     isCollapsed: false,
-    isFullscreen: false
+    isFullscreen: false,
+    requestController: null
   },
   map: {
     bounds: [],
@@ -127,7 +131,16 @@ const state = {
     query: "",
     results: [],
     loading: false,
-    lastRequestId: 0
+    lastRequestId: 0,
+    requestController: null
+  },
+  app: {
+    online: typeof navigator === "undefined" || navigator.onLine !== false,
+    mapReady: false,
+    statusAction: null,
+    storageAvailable: true,
+    sessionStorageAvailable: true,
+    lastGlobalErrorAt: 0
   },
   favoriteDraft: null,
   favoriteTagFilter: "",
@@ -244,10 +257,11 @@ const searchIntentCities = [
   "温州"
 ];
 
-init();
+void init().catch((error) => handleUnexpectedAppError(error));
 
 async function init() {
   syncViewportHeight();
+  installAppGuards();
   restoreLocation();
   loadFavorites();
   renderToolbar();
@@ -262,6 +276,69 @@ async function init() {
   showFirstVisitGuide();
   await initMap();
   renderFavoriteMarkers();
+}
+
+function installAppGuards() {
+  window.addEventListener("offline", handleOfflineState);
+  window.addEventListener("online", handleOnlineState);
+  window.addEventListener("error", (event) => {
+    if (event?.target && event.target !== window) return;
+    const error = event?.error || new Error(event?.message || "页面脚本异常");
+    handleUnexpectedAppError(error);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    if (isAbortError(event?.reason)) return;
+    event?.preventDefault?.();
+    handleUnexpectedAppError(event?.reason || new Error("异步任务异常"));
+  });
+}
+
+function handleOfflineState() {
+  state.app.online = false;
+  state.chat.requestController?.abort();
+  state.search.requestController?.abort();
+  setStatus("离线");
+  showAppBanner("当前没有网络，地图和 AI 查询暂时无法更新。网络恢复后可以继续。", {
+    tone: "warning"
+  });
+}
+
+function handleOnlineState() {
+  state.app.online = true;
+  setStatus(state.chat.isAsking ? "查询中" : "在线");
+  hideAppBanner();
+  showToast("网络已恢复，可以继续查询");
+}
+
+function handleUnexpectedAppError(error) {
+  const now = Date.now();
+  if (now - state.app.lastGlobalErrorAt < 1500) return;
+  state.app.lastGlobalErrorAt = now;
+  showAppBanner("页面刚刚遇到一点小问题，地图和收藏仍可继续使用。", {
+    tone: "error",
+    actionLabel: "重新加载",
+    action: () => window.location.reload()
+  });
+}
+
+function showAppBanner(message, { tone = "warning", action = null, actionLabel = "重试" } = {}) {
+  state.app.statusAction = typeof action === "function" ? action : null;
+  if (!els.appStatusBanner || !els.appStatusBannerText || !els.appStatusBannerAction) return;
+  els.appStatusBanner.dataset.tone = tone;
+  els.appStatusBannerText.textContent = message;
+  els.appStatusBannerAction.textContent = actionLabel;
+  els.appStatusBannerAction.hidden = !state.app.statusAction;
+  els.appStatusBanner.hidden = false;
+}
+
+function hideAppBanner() {
+  state.app.statusAction = null;
+  if (els.appStatusBanner) els.appStatusBanner.hidden = true;
+  if (els.appStatusBannerAction) els.appStatusBannerAction.hidden = true;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError" || /请求已取消|查询已取消/i.test(String(error?.message || error || ""));
 }
 
 function bindEvents() {
@@ -321,6 +398,16 @@ function bindEvents() {
   els.favoriteNoteSheet?.addEventListener("click", (event) => {
     if (event.target === els.favoriteNoteSheet) closeFavoriteNoteSheet();
   });
+  els.appStatusBannerAction?.addEventListener("click", async () => {
+    const action = state.app.statusAction;
+    if (typeof action !== "function") return;
+    els.appStatusBannerAction.disabled = true;
+    try {
+      await action();
+    } finally {
+      if (els.appStatusBannerAction) els.appStatusBannerAction.disabled = false;
+    }
+  });
   window.addEventListener("favorites-changed", handleFavoritesChanged);
   els.conversation?.addEventListener("scroll", scheduleVisiblePlaceSelection, { passive: true });
   bindMobileVoiceHoldEvents();
@@ -352,16 +439,27 @@ function loadFavorites() {
     const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
     const favorites = JSON.parse(raw || "[]");
     state.favorites = Array.isArray(favorites) ? favorites.filter(Boolean).map(normalizeFavoriteRecord) : [];
+    state.app.storageAvailable = true;
   } catch {
     state.favorites = [];
+    state.app.storageAvailable = false;
+    showAppBanner("当前浏览器不允许使用本地存储，收藏会暂时保留在本次打开期间。", {
+      tone: "warning"
+    });
   }
 }
 
 function saveFavorites() {
   try {
     localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(state.favorites));
+    state.app.storageAvailable = true;
+    return true;
   } catch {
-    // ignore storage failure
+    state.app.storageAvailable = false;
+    showAppBanner("收藏已暂存，但当前浏览器无法持久化保存，刷新后可能丢失。", {
+      tone: "warning"
+    });
+    return false;
   }
 }
 
@@ -490,7 +588,7 @@ function restoreLocation() {
     };
     state.filters.city = state.location.city;
   } catch {
-    // ignore invalid cache
+    state.app.sessionStorageAvailable = false;
   }
 }
 
@@ -669,7 +767,7 @@ async function loadRankingLayer(cityOverride = "") {
     renderRankingLayer();
     return true;
   } catch {
-    // Keep this layer quiet if ranking data is unavailable.
+    showToast("榜单数据暂时不可用，已继续显示普通地图结果");
     return false;
   }
 }
@@ -814,7 +912,7 @@ function rankingEntriesForViewport(entries, options = {}) {
     ? (zoom <= 11 ? 42 : zoom <= 13 ? 56 : zoom <= 14 ? 64 : 80)
     : (zoom <= 11 ? 90 : zoom <= 13 ? 140 : 180);
   const ranked = entries
-    .filter((entry) => entry?.location)
+    .filter((entry) => entry?.location && isValidPoint(parseLocation(entry.location)))
     .map((entry) => ({
       entry,
       distanceMeters: centerPoint.every(Number.isFinite)
@@ -867,6 +965,7 @@ function scheduleRankingViewportRender({ compact = mapRuntime.rankingRenderMode 
 function addRankingMarker(entry) {
   if (!entry?.location || !window.AMap) return;
   const point = parseLocation(entry.location);
+  if (!isValidPoint(point)) return;
   const record = favoriteRecordFromRankingEntry(entry);
   const marker = new window.AMap.Marker({
     position: point,
@@ -950,16 +1049,19 @@ function openRankingInfo(entry, position) {
 }
 
 async function initMap() {
+  setMapFallback("正在准备地图服务…", { loading: true, retry: false });
   try {
     const cfg = await apiGet("/api/config");
     if (!cfg.amapJsKey || !cfg.amapSecurityJsCode) {
-      setMapFallback("缺少高德地图前端配置。");
+      setMapFallback("地图配置暂时不可用，请稍后重试。");
       return;
     }
 
     window._AMapSecurityConfig = { securityJsCode: cfg.amapSecurityJsCode };
     await loadScript(`https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(cfg.amapJsKey)}`);
 
+    const mapElement = $("#map");
+    if (mapElement) mapElement.innerHTML = "";
     map = new window.AMap.Map("map", {
       zoom: 14,
       center: cityCenter(state.filters.city),
@@ -982,15 +1084,37 @@ async function initMap() {
     bindManualMapPick();
     await initGeolocation();
     bindViewportRankingDiscovery();
+    state.app.mapReady = true;
   } catch (error) {
-    setMapFallback(error instanceof Error ? error.message : "地图初始化失败");
+    state.app.mapReady = false;
+    if (!state.app.online) {
+      showAppBanner("当前没有网络，地图暂时无法加载。网络恢复后可以重试。", { tone: "warning" });
+    }
+    setMapFallback(friendlyMapErrorMessage(error));
   }
+}
+
+async function retryMapInitialization() {
+  hideAppBanner();
+  setMapFallback("正在重新加载地图…", { loading: true, retry: false });
+  try {
+    clearMap();
+    map?.destroy?.();
+  } catch {
+    // A partially created AMap instance may not support destroy safely.
+  }
+  map = null;
+  state.app.mapReady = false;
+  await initMap();
+  renderFavoriteMarkers();
 }
 
 function bindViewportRankingDiscovery() {
   if (!map) return;
   ["dragstart", "movestart", "zoomstart"].forEach((eventName) => map.on(eventName, beginMapInteraction));
-  map.on("dragend", handleMapViewportChange);
+  map.on("dragend", () => {
+    void handleMapViewportChange().catch((error) => showToast(friendlyErrorMessage(error)));
+  });
   map.on("moveend", () => {
     syncMapViewportState();
     endMapInteraction();
@@ -1080,9 +1204,14 @@ function bindManualMapPick() {
     state.manualPickGuardAt = now;
 
     const point = [lng, lat];
-    await commitLocationFromPoint(point, "manual-pick");
-    map.setCenter(point);
-    await refreshLocalResults();
+    try {
+      await commitLocationFromPoint(point, "manual-pick");
+      map.setCenter(point);
+      await refreshLocalResults();
+    } catch (error) {
+      showToast(friendlyErrorMessage(error));
+      setStatus("失败");
+    }
   };
 
   map.on("click", pickHandler);
@@ -1090,6 +1219,7 @@ function bindManualMapPick() {
 }
 
 async function initGeolocation() {
+  setStatus("定位中");
   try {
     await loadPlugin("AMap.Geolocation");
     const geolocation = new window.AMap.Geolocation({
@@ -1111,8 +1241,13 @@ async function initGeolocation() {
 
     await commitLocationFromGeoResult(result);
     await refreshLocalResults();
-  } catch {
+  } catch (error) {
     const fallback = cityCenter(state.filters.city);
+    showAppBanner(locationErrorMessage(error), {
+      tone: "warning",
+      actionLabel: "重新定位",
+      action: retryLocation
+    });
     await commitLocation({
       point: fallback,
       city: state.filters.city,
@@ -1125,6 +1260,11 @@ async function initGeolocation() {
     map?.setZoom(13);
     await refreshLocalResults();
   }
+}
+
+async function retryLocation() {
+  hideAppBanner();
+  await initGeolocation();
 }
 
 async function commitLocationFromGeoResult(result) {
@@ -1190,7 +1330,12 @@ async function commitLocation({ point, city, district, address, formattedAddress
     source: source || "unknown"
   };
   state.filters.city = state.location.city;
-  sessionStorage.setItem("amap.currentLocation", JSON.stringify(state.location));
+  try {
+    sessionStorage.setItem("amap.currentLocation", JSON.stringify(state.location));
+    state.app.sessionStorageAvailable = true;
+  } catch {
+    state.app.sessionStorageAvailable = false;
+  }
   ensureCityOption(state.filters.city);
   syncToolbarValues();
   renderContext();
@@ -1212,6 +1357,7 @@ async function refreshNearby() {
   if (!map || !Array.isArray(state.location.location)) return;
   const requestId = ++state.nearbyRequestId;
   setStatus("刷新中");
+  setEvidenceNotice("正在查询真实周边结果…");
 
   try {
     const query = new URLSearchParams({
@@ -1233,7 +1379,14 @@ async function refreshNearby() {
     setStatus("在线");
   } catch (error) {
     if (requestId !== state.nearbyRequestId) return;
-    renderEvidenceNotice(error instanceof Error ? error.message : "周边刷新失败");
+    if (isAbortError(error)) return;
+    const message = friendlyErrorMessage(error);
+    renderEvidenceNotice(message);
+    showAppBanner(message, {
+      tone: "warning",
+      actionLabel: "重试周边",
+      action: refreshNearby
+    });
     setStatus("失败");
   }
 }
@@ -1243,7 +1396,8 @@ function renderNearbyMap(payload) {
 
   const pois = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []);
   const bounds = [];
-  const origin = payload.origin?.location ? parseLocation(payload.origin.location) : state.location.location;
+  const originCandidate = payload.origin?.location ? parseLocation(payload.origin.location) : state.location.location;
+  const origin = isValidPoint(originCandidate) ? originCandidate : null;
 
   if (els.mapTitle) {
     const titleCity = payload.origin?.city || state.location.city || state.filters.city;
@@ -1277,8 +1431,9 @@ function renderNearbyMap(payload) {
   }
 
   pois.slice(0, 10).forEach((poi, index) => {
-    if (!poi.location) return;
+    if (!cleanText(poi?.name)) return;
     const point = parseLocation(poi.location);
+    if (!isValidPoint(point)) return;
     const record = favoriteRecordFromPoi(poi);
     bounds.push(point);
     const marker = new window.AMap.Marker({
@@ -1520,8 +1675,9 @@ function isFavoriteId(id) {
 }
 
 function dispatchFavoritesChanged() {
-  saveFavorites();
+  const persisted = saveFavorites();
   window.dispatchEvent(new CustomEvent("favorites-changed", { detail: { favorites: state.favorites } }));
+  return persisted;
 }
 
 function handleFavoritesChanged(event) {
@@ -1815,12 +1971,17 @@ async function runSearchPanelQuery(rawQuery, options = {}) {
   const searchIntent = resolveSearchPanelIntent(query);
   const requestId = state.search.lastRequestId + 1;
   state.search.lastRequestId = requestId;
+  state.search.requestController?.abort();
+  const requestController = new AbortController();
+  state.search.requestController = requestController;
   state.search.query = query;
+  state.search.results = [];
   state.search.loading = true;
   renderSearchPanel();
   try {
     const payload = await apiGet(
-      `/api/search?keywords=${encodeURIComponent(searchIntent.keywords)}&city=${encodeURIComponent(searchIntent.city)}`
+      `/api/search?keywords=${encodeURIComponent(searchIntent.keywords)}&city=${encodeURIComponent(searchIntent.city)}`,
+      { signal: requestController.signal }
     );
     if (requestId !== state.search.lastRequestId) return;
     state.search.results = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []).slice(0, 20);
@@ -1832,10 +1993,23 @@ async function runSearchPanelQuery(rawQuery, options = {}) {
     }
   } catch (error) {
     if (requestId !== state.search.lastRequestId) return;
+    if (isAbortError(error)) {
+      state.search.loading = false;
+      renderSearchPanel();
+      return;
+    }
     state.search.loading = false;
     state.search.results = [];
     renderSearchPanel();
-    showToast(error instanceof Error ? error.message : "搜索失败");
+    const message = friendlyErrorMessage(error);
+    showToast(message);
+    showAppBanner(message, {
+      tone: "warning",
+      actionLabel: "重试搜索",
+      action: () => runSearchPanelQuery(query, options)
+    });
+  } finally {
+    if (state.search.requestController === requestController) state.search.requestController = null;
   }
 }
 
@@ -2064,7 +2238,9 @@ function commitFavoriteDraft(withNote) {
   }, note);
   closeFavoriteNoteSheet();
   syncFavoriteButtons();
-  showToast(note ? "已收藏并写入私人备注" : "已加入收藏");
+  showToast(state.app.storageAvailable
+    ? (note ? "已收藏并写入私人备注" : "已加入收藏")
+    : "已暂存收藏，但刷新后可能丢失");
 }
 
 function handlePlaceCardInteraction(event) {
@@ -2283,7 +2459,24 @@ function friendlyErrorMessage(error) {
   if (/起点|终点|路线|怎么走|识别/.test(raw)) {
     return "我还没稳稳识别出起点和终点。你可以换成“从某地到某地怎么走”再试一次。";
   }
-  return `这次查询没有稳定完成：${raw || "请换个更具体的问法再试一次。"}`;
+  if (/没有找到|暂无|没有可展示|未找到/.test(raw)) return raw;
+  return "这次查询没有稳定完成，请稍后重试或换个更具体的问法。";
+}
+
+function friendlyMapErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/配置|AMAP|key|安全|权限/i.test(raw)) return "地图配置暂时不可用，请稍后重试。";
+  if (/超时|网络|fetch failed|加载/i.test(raw)) return "地图服务响应有点慢，请检查网络后重试。";
+  return "地图暂时没有加载成功，请稍后重试。";
+}
+
+function locationErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/denied|not.?allowed|permission|权限|拒绝|PERMISSION/i.test(raw)) {
+    return "没有拿到定位权限，当前先使用城市中心位置。允许定位后可获取真实周边结果。";
+  }
+  if (/超时|timeout/i.test(raw)) return "定位响应超时，当前先使用城市中心位置。";
+  return "暂时无法获取真实定位，当前先使用城市中心位置。";
 }
 
 async function handleQuestionSubmit(event) {
@@ -2361,12 +2554,16 @@ function handleVoiceButtonClick(event) {
   startVoiceRecognition(targetKey);
 }
 
-async function askAgent(question) {
+async function askAgent(question, { retry = false } = {}) {
   if (state.chat.isAsking) return;
+  const requestController = new AbortController();
+  state.chat.requestController = requestController;
   setAskingState(true);
   clearResultSurface("正在获取新的地点证据...");
-  state.chat.history.push({ role: "user", content: question });
-  appendMessage("user", question);
+  if (!retry) {
+    state.chat.history.push({ role: "user", content: question });
+    appendMessage("user", question);
+  }
   updateChatMode();
 
   const thinking = appendMessage("assistant", "正在分析问题，并调用高德 API 获取真实数据...", {
@@ -2385,7 +2582,8 @@ async function askAgent(question) {
         history: state.chat.history.slice(-40),
         context: buildContextPayload()
       },
-      thinking
+      thinking,
+      { signal: requestController.signal }
     );
 
     appendAnswer(payload);
@@ -2402,13 +2600,27 @@ async function askAgent(question) {
     requestAnimationFrame(() => els.inlineInput?.focus());
   } catch (error) {
     thinking.remove();
-    appendMessage("assistant", friendlyErrorMessage(error), {
-      title: "查询失败",
-      icon: "green"
-    });
-    setStatus("失败");
+    updateChatMode();
+    if (!isAbortError(error) || state.app.online) {
+      const message = friendlyErrorMessage(error);
+      appendMessage("assistant", message, {
+        title: "查询失败",
+        icon: "green"
+      });
+      if (state.app.online) {
+        showAppBanner(message, {
+          tone: "warning",
+          actionLabel: "重试查询",
+          action: () => askAgent(question, { retry: true })
+        });
+      }
+      setStatus("失败");
+    } else {
+      setStatus("离线");
+    }
   } finally {
     setAskingState(false);
+    if (state.chat.requestController === requestController) state.chat.requestController = null;
   }
 }
 
@@ -2468,7 +2680,7 @@ function appendMessage(role, content, options = {}) {
 }
 
 function appendAnswer(payload, options = {}) {
-  const answerText = payload?.answer || payload?.source || "以下是真实高德数据返回的地点证据。";
+  const answerText = cleanText(payload?.answer) || cleanText(payload?.source) || "这次没有拿到足够稳定的地点结果，请换个更具体的问法再试一次。";
 
   const message = appendMessage("assistant", answerText, {
     title: intentLabel(payload?.intent || "search"),
@@ -2486,7 +2698,7 @@ function appendAnswer(payload, options = {}) {
 }
 
 function buildAnswerCards(payload) {
-  const pois = payload?.data?.pois || [];
+  const pois = (payload?.data?.pois || []).filter(validPoiForDisplay);
   if (Array.isArray(pois) && pois.length) {
     const limit = isMobileViewport() ? 6 : 8;
     return `<div class="answer-list">${pois.slice(0, limit).map((poi) => placeCard(poi)).join("")}</div>`;
@@ -2568,95 +2780,124 @@ function buildFollowupQuestions(payload) {
   return Array.from(options).slice(0, 4);
 }
 
-async function streamAgentReply(path, body, thinkingElement) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok || !response.body) {
-    throw new Error(`请求失败：${response.status}`);
+async function streamAgentReply(path, body, thinkingElement, { signal: externalSignal } = {}) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let abortedByCaller = Boolean(externalSignal?.aborted);
+  const forwardAbort = () => {
+    abortedByCaller = true;
+    controller.abort();
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) forwardAbort();
+    else externalSignal.addEventListener("abort", forwardAbort, { once: true });
   }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let eventName = "message";
-  let dataLines = [];
-  let streamedText = "";
-  let finalPayload = null;
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 60000);
   let streamRenderFrame = 0;
-  let shouldStickToBottom = false;
 
-  const renderStreamedText = () => {
-    streamRenderFrame = 0;
-    const target = thinkingElement?.querySelector(".message-text");
-    if (target) target.textContent = streamedText;
-    if (shouldStickToBottom) scrollConversationToBottom(true);
-  };
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
 
-  const applyDelta = (text) => {
-    if (!text) return;
-    shouldStickToBottom = isConversationNearBottom();
-    streamedText += text;
-    if (!streamRenderFrame) streamRenderFrame = window.requestAnimationFrame(renderStreamedText);
-  };
-
-  const handleEvent = (name, data) => {
-    let payload = {};
-    try {
-      payload = data ? JSON.parse(data) : {};
-    } catch {
-      payload = {};
+    if (!response.ok || !response.body) {
+      throw new Error(`请求失败：${response.status}`);
     }
 
-    if (name === "delta") applyDelta(payload.text || "");
-    if (name === "error") throw new Error(payload.error || "查询失败");
-    if (name === "done") {
-      finalPayload = payload;
-      finalPayload.__renderAnalysis = !streamedText;
-    }
-  };
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let eventName = "message";
+    let dataLines = [];
+    let streamedText = "";
+    let finalPayload = null;
+    let shouldStickToBottom = false;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const renderStreamedText = () => {
+      streamRenderFrame = 0;
+      const target = thinkingElement?.querySelector(".message-text");
+      if (target) target.textContent = streamedText;
+      if (shouldStickToBottom) scrollConversationToBottom(true);
+    };
 
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
+    const applyDelta = (text) => {
+      if (!text) return;
+      shouldStickToBottom = isConversationNearBottom();
+      streamedText += text;
+      if (!streamRenderFrame) streamRenderFrame = window.requestAnimationFrame(renderStreamedText);
+    };
 
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        eventName = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trim());
-      } else if (line === "") {
-        if (dataLines.length) {
-          handleEvent(eventName, dataLines.join("\n"));
-          dataLines = [];
-          eventName = "message";
+    const handleEvent = (name, data) => {
+      let payload = {};
+      try {
+        payload = data ? JSON.parse(data) : {};
+      } catch {
+        payload = {};
+      }
+
+      if (name === "delta") applyDelta(payload.text || "");
+      if (name === "error") throw new Error(payload.error || "查询失败");
+      if (name === "done") {
+        finalPayload = payload;
+        finalPayload.__renderAnalysis = !streamedText;
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trim());
+        } else if (line === "") {
+          if (dataLines.length) {
+            handleEvent(eventName, dataLines.join("\n"));
+            dataLines = [];
+            eventName = "message";
+          }
         }
       }
+
+      if (done) break;
     }
 
-    if (done) break;
+    if (!finalPayload) throw new Error("查询没有返回完整结果");
+    if (streamRenderFrame) {
+      window.cancelAnimationFrame(streamRenderFrame);
+      renderStreamedText();
+    }
+    const deepseekText = (streamedText || finalPayload.analysis || "").trim();
+    if (deepseekText) {
+      finalPayload.analysis = deepseekText;
+      const target = thinkingElement?.querySelector(".message-text");
+      if (target) target.textContent = deepseekText;
+    }
+    // Keep the streamed placeholder marked as pending until appendAnswer replaces it.
+    updateChatMode();
+    return finalPayload;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      if (abortedByCaller) throw new Error("查询已取消");
+      if (timedOut) throw new Error("AI 查询超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    if (streamRenderFrame) window.cancelAnimationFrame(streamRenderFrame);
+    externalSignal?.removeEventListener("abort", forwardAbort);
   }
-
-  if (!finalPayload) throw new Error("查询没有返回完整结果");
-  if (streamRenderFrame) {
-    window.cancelAnimationFrame(streamRenderFrame);
-    renderStreamedText();
-  }
-  const deepseekText = (streamedText || finalPayload.analysis || "").trim();
-  if (deepseekText) {
-    finalPayload.analysis = deepseekText;
-    const target = thinkingElement?.querySelector(".message-text");
-    if (target) target.textContent = deepseekText;
-  }
-  // Keep the streamed placeholder marked as pending until appendAnswer replaces it.
-  updateChatMode();
-  return finalPayload;
 }
 
 function isConversationNearBottom() {
@@ -2729,9 +2970,11 @@ function renderAgentMap(payload) {
   if (els.plannerBadge) els.plannerBadge.textContent = plannerText(payload.planner);
 
   const bounds = [];
-  (payload.map.markers || []).forEach((item) => {
-    if (!item.location) return;
+  const mapMarkers = Array.isArray(payload.map.markers) ? payload.map.markers : [];
+  mapMarkers.forEach((item) => {
+    if (!cleanText(item?.title || item?.name)) return;
     const point = parseLocation(item.location);
+    if (!isValidPoint(point)) return;
     const record = favoriteRecordFromPoi({
       ...item,
       name: item.title,
@@ -2761,9 +3004,10 @@ function renderAgentMap(payload) {
     }
   });
 
-  if (payload.map.radius && payload.map.center) {
+  const mapCenter = payload.map.center ? parseLocation(payload.map.center) : null;
+  if (payload.map.radius && isValidPoint(mapCenter)) {
     const circle = new window.AMap.Circle({
-      center: parseLocation(payload.map.center),
+      center: mapCenter,
       radius: Number(payload.map.radius),
       strokeColor: "#008f81",
       strokeOpacity: 0.66,
@@ -2780,6 +3024,9 @@ function renderAgentMap(payload) {
     const routePath = Array.isArray(payload.map.route.path) && payload.map.route.path.length
       ? payload.map.route.path.map(parseLocation).filter((point) => point.length === 2 && point.every(Number.isFinite))
       : [parseLocation(payload.map.route.origin), parseLocation(payload.map.route.destination)];
+    if (routePath.length < 2 || routePath.some((point) => !isValidPoint(point))) {
+      setEvidenceNotice("路线数据不完整，暂时无法在地图上绘制路径。");
+    } else {
     const line = new window.AMap.Polyline({
       path: routePath,
       strokeColor: routeModeColor(routeMode),
@@ -2792,6 +3039,11 @@ function renderAgentMap(payload) {
     });
     addMapOverlay("base", line);
     routePath.forEach((point) => bounds.push(point));
+    }
+  }
+
+  if (!mapMarkers.length && !payload.map.route && els.mapTitle) {
+    els.mapTitle.textContent = "暂无可定位的地点";
   }
 
   state.map.bounds = bounds;
@@ -2806,20 +3058,21 @@ function renderAgentEvidence(payload) {
   if (!els.evidence) return;
   const pois = sortPoisByDistance(Array.isArray(payload.data?.allPois) && payload.data.allPois.length ? payload.data.allPois : payload.data?.pois || []);
 
-  if ((payload.intent === "nearby" || payload.intent === "search" || payload.intent === "travel") && pois.length) {
-    setEvidenceRows(
-      pois.map((poi, index) =>
-        evidenceRow(
-          index + 1,
-          poi.name,
-          [poi.district, poi.address].filter(Boolean).join(" "),
-          formatDistance(poi.distance),
-          formatRating(poi.rating),
-          "高德"
-        )
-      ),
-      6
-    );
+  if (payload.intent === "nearby" || payload.intent === "search" || payload.intent === "travel") {
+    if (!pois.length) {
+      setEvidenceNotice(payload.answer || "当前没有找到可展示的真实地点，可以换个区域或更具体的关键词。");
+      return;
+    }
+    setEvidenceRows(pois.map((poi, index) =>
+      evidenceRow(
+        index + 1,
+        poi.name,
+        [poi.district, poi.address].filter(Boolean).join(" "),
+        formatDistance(poi.distance),
+        formatRating(poi.rating),
+        "高德"
+      )
+    ), 6);
     return;
   }
 
@@ -2871,7 +3124,13 @@ function evidenceRow(rank, name, address, distance, score, source) {
 }
 
 function sortPoisByDistance(pois) {
-  return [...(pois || [])].sort((left, right) => numericDistance(left.distance) - numericDistance(right.distance));
+  return [...(pois || [])]
+    .filter(validPoiForDisplay)
+    .sort((left, right) => numericDistance(left.distance) - numericDistance(right.distance));
+}
+
+function validPoiForDisplay(poi) {
+  return Boolean(cleanText(poi?.name) && isValidPoint(parseLocation(poi?.location)));
 }
 
 function numericDistance(distance) {
@@ -3426,7 +3685,12 @@ function showToast(message) {
 }
 
 function showFirstVisitGuide() {
-  if (localStorage.getItem(GUIDE_STORAGE_KEY) || !els.heroAskCard) return;
+  if (!els.heroAskCard) return;
+  try {
+    if (localStorage.getItem(GUIDE_STORAGE_KEY)) return;
+  } catch {
+    return;
+  }
   els.heroAskCard.querySelector(".first-visit-guide")?.remove();
 
   const guide = document.createElement("div");
@@ -3446,7 +3710,11 @@ function showFirstVisitGuide() {
     if (!guide.isConnected) return;
     guide.classList.add("is-dismissing");
     window.clearTimeout(guideDismissTimer);
-    localStorage.setItem(GUIDE_STORAGE_KEY, "1");
+    try {
+      localStorage.setItem(GUIDE_STORAGE_KEY, "1");
+    } catch {
+      // The guide can still be dismissed for this session if storage is blocked.
+    }
     window.setTimeout(() => guide.remove(), 400);
     document.removeEventListener("click", handleUserInteraction, true);
     document.removeEventListener("keydown", handleUserInteraction, true);
@@ -3603,12 +3871,12 @@ function fitMap() {
   map.setFitView(overlays, false, [80, 80, 80, 80], 16);
 }
 
-function apiGet(path) {
-  return fetch(path).then(async (response) => {
-    const payload = await response.json();
-    if (!response.ok || payload.ok === false) throw new Error(payload.error || "请求失败");
-    return payload;
-  });
+async function apiGet(path, options = {}) {
+  if (!state.app.online) throw new Error("当前处于离线状态");
+  const response = await fetchWithTimeout(path, options, 20000, "服务请求");
+  const payload = await readJsonPayload(response);
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || `请求失败：${response.status}`);
+  return payload;
 }
 
 async function apiPost(path, body) {
@@ -3621,54 +3889,122 @@ async function apiPost(path, body) {
     },
     45000
   );
-  const payload = await response.json();
+  const payload = await readJsonPayload(response);
   if (!response.ok || payload.ok === false) throw new Error(payload.error || "请求失败");
   return payload;
 }
 
-function loadPlugin(name) {
+async function readJsonPayload(response) {
+  const raw = await response.text();
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("服务返回了无法读取的数据");
+  }
+}
+
+function loadPlugin(name, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
+    if (!window.AMap?.plugin) {
+      reject(new Error("高德地图服务尚未准备好"));
+      return;
+    }
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("地图插件加载超时"));
+    }, timeoutMs);
     window.AMap.plugin([name], () => {
-      try {
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve();
     });
   });
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 45000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 45000, label = "请求") {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let abortedByCaller = Boolean(options.signal?.aborted);
+  const handleCallerAbort = () => {
+    abortedByCaller = true;
+    controller.abort();
+  };
+  if (options.signal) {
+    if (options.signal.aborted) handleCallerAbort();
+    else options.signal.addEventListener("abort", handleCallerAbort, { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("请求超时");
+    if (error?.name === "AbortError") {
+      if (abortedByCaller) throw new Error("请求已取消");
+      if (timedOut) throw new Error(`${label}超时`);
+    }
     throw error;
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener("abort", handleCallerAbort);
   }
 }
 
-function loadScript(src) {
+function loadScript(src, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = src;
     script.async = true;
-    script.onload = resolve;
-    script.onerror = () => reject(new Error("高德地图 JS API 加载失败"));
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      script.remove();
+      reject(new Error("高德地图 JS API 加载超时"));
+    }, timeoutMs);
+    script.onload = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve();
+    };
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      reject(new Error("高德地图 JS API 加载失败"));
+    };
     document.head.appendChild(script);
   });
 }
 
-function setMapFallback(message) {
+function setMapFallback(message, { loading = false, retry = true } = {}) {
   const mapEl = $("#map");
-  if (mapEl) mapEl.innerHTML = `<div class="map-fallback">${escapeHtml(message)}</div>`;
+  if (!mapEl) return;
+  mapEl.innerHTML = `
+    <div class="map-fallback${loading ? " is-loading" : ""}">
+      <div class="map-fallback-content">
+        <span class="map-fallback-icon" aria-hidden="true">${loading ? "…" : "!"}</span>
+        <strong>${loading ? "地图加载中" : "地图暂时不可用"}</strong>
+        <span>${escapeHtml(message)}</span>
+        ${retry ? '<button class="map-fallback-retry" type="button">重试地图</button>' : ""}
+      </div>
+    </div>
+  `;
+  mapEl.querySelector(".map-fallback-retry")?.addEventListener("click", () => void retryMapInitialization());
 }
 
 function parseLocation(location) {
   return String(location).split(",").map((value) => Number(value));
+}
+
+function isValidPoint(point) {
+  return Array.isArray(point) && point.length === 2 && point.every((value) => Number.isFinite(Number(value)));
 }
 
 function pointToString(point) {
@@ -3761,7 +4097,10 @@ function cleanText(value) {
 }
 
 function setStatus(text) {
-  if (els.status) els.status.textContent = text;
+  if (els.status) {
+    els.status.textContent = text;
+    els.status.dataset.status = /失败|离线/.test(text) ? "error" : /查询中|刷新中|定位中/.test(text) ? "loading" : "ready";
+  }
 }
 
 function escapeHtml(value) {
