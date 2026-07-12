@@ -169,6 +169,8 @@ const mapRuntime = {
   resizeFrame: 0,
   resizeTimer: 0,
   rankingRenderTimer: 0,
+  rankingRenderMode: "settled",
+  rankingBatchToken: 0,
   mapInteractionTimer: 0,
   cardSelectionFrame: 0,
   cardSelectionLockUntil: 0
@@ -717,13 +719,15 @@ function renderRankingLayer() {
     addMapOverlay("walkRadius", circle);
   }
 
-  rankingEntriesForViewport(mapEntries).forEach(addRankingMarker);
+  mapRuntime.rankingRenderMode = "compact";
+  renderRankingViewportMarkers({ compact: true });
 
   state.map.bounds = [];
   renderMapLegend();
   renderLayerToggles();
   applyLayerVisibility();
   fitMap();
+  scheduleRankingViewportRender({ compact: false, delay: 220 });
 }
 
 function renderRankingEvidence(entries) {
@@ -794,8 +798,11 @@ function syncRankingToolbarVisibility() {
   if (toolbar) toolbar.hidden = !hasRankingDataForCurrentCity();
 }
 
-function rankingEntriesForViewport(entries) {
+function rankingEntriesForViewport(entries, options = {}) {
   if (!map || !Array.isArray(entries)) return [];
+  const compact = typeof options.compact === "boolean"
+    ? options.compact
+    : mapRuntime.rankingRenderMode === "compact";
   const center = map.getCenter?.();
   const centerPoint = [
     Number(center?.getLng?.() ?? center?.lng),
@@ -817,19 +824,44 @@ function rankingEntriesForViewport(entries) {
     }))
     .sort((left, right) => right.priority - left.priority || left.distanceMeters - right.distanceMeters);
   const nearby = ranked.filter((item) => item.distanceMeters <= radiusByZoom);
+  if (!compact) return ranked.map((item) => item.entry);
   return (nearby.length ? nearby : ranked).slice(0, limit).map((item) => item.entry);
 }
 
-function scheduleRankingViewportRender() {
+function renderRankingViewportMarkers({ compact = mapRuntime.rankingRenderMode === "compact" } = {}) {
+  if (!map || !hasRankingDataForCurrentCity() || !state.rankings.markers.length) return;
+  clearRankingOverlays();
+  const entries = filterRankingMarkers(state.rankings.markers);
+  const visibleEntries = rankingEntriesForViewport(entries, { compact });
+  if (compact) {
+    visibleEntries.forEach(addRankingMarker);
+    applyLayerVisibility();
+    syncSelectedPlaceUI();
+    return;
+  }
+
+  const token = mapRuntime.rankingBatchToken;
+  let offset = 0;
+  const appendBatch = () => {
+    if (token !== mapRuntime.rankingBatchToken) return;
+    visibleEntries.slice(offset, offset + 24).forEach(addRankingMarker);
+    offset += 24;
+    applyLayerVisibility();
+    syncSelectedPlaceUI();
+    if (offset < visibleEntries.length) {
+      window.requestAnimationFrame(appendBatch);
+    }
+  };
+  window.requestAnimationFrame(appendBatch);
+}
+
+function scheduleRankingViewportRender({ compact = mapRuntime.rankingRenderMode === "compact", delay = 90 } = {}) {
   if (!map || !hasRankingDataForCurrentCity() || !state.rankings.markers.length) return;
   window.clearTimeout(mapRuntime.rankingRenderTimer);
   mapRuntime.rankingRenderTimer = window.setTimeout(() => {
-    clearRankingOverlays();
-    const entries = filterRankingMarkers(state.rankings.markers);
-    rankingEntriesForViewport(entries).forEach(addRankingMarker);
-    applyLayerVisibility();
-    syncSelectedPlaceUI();
-  }, 90);
+    mapRuntime.rankingRenderMode = compact ? "compact" : "settled";
+    renderRankingViewportMarkers({ compact });
+  }, delay);
 }
 
 function addRankingMarker(entry) {
@@ -976,12 +1008,19 @@ function beginMapInteraction() {
     state.layers.menuOpen = false;
     renderLayerToggles();
   }
+  if (hasRankingDataForCurrentCity() && state.rankings.markers.length) {
+    mapRuntime.rankingRenderMode = "compact";
+    renderRankingViewportMarkers({ compact: true });
+  }
   document.body.classList.add("map-interacting");
 }
 
 function endMapInteraction() {
   window.clearTimeout(mapRuntime.mapInteractionTimer);
-  mapRuntime.mapInteractionTimer = window.setTimeout(() => document.body.classList.remove("map-interacting"), 80);
+  mapRuntime.mapInteractionTimer = window.setTimeout(() => {
+    document.body.classList.remove("map-interacting");
+    scheduleRankingViewportRender({ compact: false, delay: 0 });
+  }, 80);
 }
 
 async function handleMapViewportChange() {
@@ -3546,6 +3585,7 @@ function renderFavoriteMarkers() {
 }
 
 function clearRankingOverlays() {
+  mapRuntime.rankingBatchToken += 1;
   mapRuntime.overlays.rankings.forEach((overlay) => overlay.setMap?.(null));
   mapRuntime.overlays.rankings = [];
   unregisterPlaceMarkers("rankings");
