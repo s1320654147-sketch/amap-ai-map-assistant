@@ -73,6 +73,8 @@ const FILTERS = {
 const RANKING_CITY_NAMES = new Set(["上海", "上海市"]);
 const FAVORITES_STORAGE_KEY = "amap_favorites";
 const GUIDE_STORAGE_KEY = "amap_guided";
+const VOICE_HOLD_CANCEL_THRESHOLD = 52;
+const VOICE_CLICK_SUPPRESSION_MS = 680;
 
 const state = {
   activeView: "chat",
@@ -138,6 +140,9 @@ const state = {
     online: typeof navigator === "undefined" || navigator.onLine !== false,
     mapReady: false,
     statusAction: null,
+    statusKey: "",
+    connectivityProbeTimer: 0,
+    connectivityProbeInFlight: false,
     storageAvailable: true,
     sessionStorageAvailable: true,
     lastGlobalErrorAt: 0
@@ -151,6 +156,9 @@ const state = {
   },
   voice: {
     supported: false,
+    canRequestMicrophone: false,
+    permissionState: "unknown",
+    startRequestId: 0,
     isListening: false,
     targetKey: "questionInput",
     pendingTargetKey: "",
@@ -159,8 +167,13 @@ const state = {
     mobileHoldActive: false,
     mobileHoldCanceled: false,
     mobileHoldStartY: 0,
+    mobileHoldDeltaY: 0,
+    mobileHoldPointerId: null,
+    mobileHoldButton: null,
+    mobileHoldPhase: "idle",
     cancelOnEnd: false,
-    suppressNextMobileClick: false
+    suppressNextMobileClick: false,
+    suppressClickTimer: 0
   }
 };
 
@@ -280,7 +293,12 @@ async function init() {
 
 function installAppGuards() {
   window.addEventListener("offline", handleOfflineState);
-  window.addEventListener("online", handleOnlineState);
+  window.addEventListener("online", () => void handleOnlineState());
+  window.addEventListener("focus", () => scheduleConnectivityProbe());
+  window.addEventListener("pageshow", () => scheduleConnectivityProbe());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") scheduleConnectivityProbe();
+  });
   window.addEventListener("error", (event) => {
     if (event?.target && event.target !== window) return;
     const error = event?.error || new Error(event?.message || "页面脚本异常");
@@ -299,15 +317,54 @@ function handleOfflineState() {
   state.search.requestController?.abort();
   setStatus("离线");
   showAppBanner("当前没有网络，地图和 AI 查询暂时无法更新。网络恢复后可以继续。", {
-    tone: "warning"
+    tone: "warning",
+    key: "offline"
   });
+  scheduleConnectivityProbe(1200);
 }
 
-function handleOnlineState() {
-  state.app.online = true;
-  setStatus(state.chat.isAsking ? "查询中" : "在线");
-  hideAppBanner();
-  showToast("网络已恢复，可以继续查询");
+async function handleOnlineState() {
+  const wasOffline = !state.app.online;
+  try {
+    if (!await probeConnectivity()) throw new Error("网络检测仍在进行");
+    state.app.online = true;
+    setStatus(state.chat.isAsking ? "查询中" : "在线");
+    hideAppBanner("offline");
+    if (wasOffline) showToast("网络已恢复，可以继续查询");
+  } catch {
+    state.app.online = false;
+    scheduleConnectivityProbe(1800);
+  }
+}
+
+function scheduleConnectivityProbe(delay = 0) {
+  window.clearTimeout(state.app.connectivityProbeTimer);
+  state.app.connectivityProbeTimer = window.setTimeout(() => {
+    void probeConnectivity().catch(() => {
+      if (!state.app.online) scheduleConnectivityProbe(5000);
+    });
+  }, Math.max(0, delay));
+}
+
+async function probeConnectivity() {
+  if (state.app.connectivityProbeInFlight) return false;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    if (state.app.online) handleOfflineState();
+    throw new Error("当前没有网络");
+  }
+  state.app.connectivityProbeInFlight = true;
+  try {
+    const response = await fetchWithTimeout(`/api/health?probe=${Date.now()}`, { cache: "no-store" }, 8000, "网络检测");
+    if (!response.ok) throw new Error(`网络检测失败：${response.status}`);
+    if (!state.app.online) {
+      state.app.online = true;
+      setStatus(state.chat.isAsking ? "查询中" : "在线");
+      hideAppBanner("offline");
+    }
+    return true;
+  } finally {
+    state.app.connectivityProbeInFlight = false;
+  }
 }
 
 function handleUnexpectedAppError(error) {
@@ -316,13 +373,19 @@ function handleUnexpectedAppError(error) {
   state.app.lastGlobalErrorAt = now;
   showAppBanner("页面刚刚遇到一点小问题，地图和收藏仍可继续使用。", {
     tone: "error",
+    key: "runtime",
     actionLabel: "重新加载",
     action: () => window.location.reload()
   });
 }
 
-function showAppBanner(message, { tone = "warning", action = null, actionLabel = "重试" } = {}) {
+function showAppBanner(message, { tone = "warning", key = "general", action = null, actionLabel = "重试" } = {}) {
+  if (!String(message || "").trim()) {
+    hideAppBanner(key);
+    return;
+  }
   state.app.statusAction = typeof action === "function" ? action : null;
+  state.app.statusKey = key;
   if (!els.appStatusBanner || !els.appStatusBannerText || !els.appStatusBannerAction) return;
   els.appStatusBanner.dataset.tone = tone;
   els.appStatusBannerText.textContent = message;
@@ -331,8 +394,10 @@ function showAppBanner(message, { tone = "warning", action = null, actionLabel =
   els.appStatusBanner.hidden = false;
 }
 
-function hideAppBanner() {
+function hideAppBanner(key = "") {
+  if (key && state.app.statusKey && state.app.statusKey !== key) return;
   state.app.statusAction = null;
+  state.app.statusKey = "";
   if (els.appStatusBanner) els.appStatusBanner.hidden = true;
   if (els.appStatusBannerAction) els.appStatusBannerAction.hidden = true;
 }
@@ -444,7 +509,8 @@ function loadFavorites() {
     state.favorites = [];
     state.app.storageAvailable = false;
     showAppBanner("当前浏览器不允许使用本地存储，收藏会暂时保留在本次打开期间。", {
-      tone: "warning"
+      tone: "warning",
+      key: "storage"
     });
   }
 }
@@ -457,7 +523,8 @@ function saveFavorites() {
   } catch {
     state.app.storageAvailable = false;
     showAppBanner("收藏已暂存，但当前浏览器无法持久化保存，刷新后可能丢失。", {
-      tone: "warning"
+      tone: "warning",
+      key: "storage"
     });
     return false;
   }
@@ -1088,14 +1155,14 @@ async function initMap() {
   } catch (error) {
     state.app.mapReady = false;
     if (!state.app.online) {
-      showAppBanner("当前没有网络，地图暂时无法加载。网络恢复后可以重试。", { tone: "warning" });
+      showAppBanner("当前没有网络，地图暂时无法加载。网络恢复后可以重试。", { tone: "warning", key: "offline" });
     }
     setMapFallback(friendlyMapErrorMessage(error));
   }
 }
 
 async function retryMapInitialization() {
-  hideAppBanner();
+  hideAppBanner("map");
   setMapFallback("正在重新加载地图…", { loading: true, retry: false });
   try {
     clearMap();
@@ -1245,6 +1312,7 @@ async function initGeolocation() {
     const fallback = cityCenter(state.filters.city);
     showAppBanner(locationErrorMessage(error), {
       tone: "warning",
+      key: "location",
       actionLabel: "重新定位",
       action: retryLocation
     });
@@ -1263,7 +1331,7 @@ async function initGeolocation() {
 }
 
 async function retryLocation() {
-  hideAppBanner();
+  hideAppBanner("location");
   await initGeolocation();
 }
 
@@ -1299,6 +1367,7 @@ async function commitLocationFromGeoResult(result) {
     formattedAddress: reverse?.formattedAddress || result?.formattedAddress || "",
     source: "geolocation"
   });
+  hideAppBanner("location");
 }
 
 async function commitLocationFromPoint(point, source) {
@@ -1376,6 +1445,7 @@ async function refreshNearby() {
     renderNearbyMap(payload);
     renderNearbyEvidence(payload);
     renderContext();
+    hideAppBanner("request");
     setStatus("在线");
   } catch (error) {
     if (requestId !== state.nearbyRequestId) return;
@@ -1384,6 +1454,7 @@ async function refreshNearby() {
     renderEvidenceNotice(message);
     showAppBanner(message, {
       tone: "warning",
+      key: "request",
       actionLabel: "重试周边",
       action: refreshNearby
     });
@@ -1987,6 +2058,7 @@ async function runSearchPanelQuery(rawQuery, options = {}) {
     state.search.results = sortPoisByDistance(Array.isArray(payload.pois) ? payload.pois : []).slice(0, 20);
     state.search.loading = false;
     renderSearchPanel();
+    hideAppBanner("request");
     if (options.immediate && state.search.results[0]?.location && map) {
       const point = parseLocation(state.search.results[0].location);
       if (point.length === 2 && point.every(Number.isFinite)) map.setZoomAndCenter(15, point);
@@ -2005,6 +2077,7 @@ async function runSearchPanelQuery(rawQuery, options = {}) {
     showToast(message);
     showAppBanner(message, {
       tone: "warning",
+      key: "request",
       actionLabel: "重试搜索",
       action: () => runSearchPanelQuery(query, options)
     });
@@ -2332,6 +2405,7 @@ async function handleSuggestedQuestion(question) {
 
 function initVoiceInput() {
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  state.voice.canRequestMicrophone = Boolean(navigator.mediaDevices?.getUserMedia);
   if (!SpeechRecognitionCtor) {
     updateVoiceButtons();
     return;
@@ -2345,6 +2419,7 @@ function initVoiceInput() {
 
   recognition.addEventListener("start", () => {
     state.voice.isListening = true;
+    if (state.voice.mobileHoldActive) state.voice.mobileHoldPhase = "recording";
     updateVoiceButtons();
     setStatus("语音输入中");
   });
@@ -2357,23 +2432,24 @@ function initVoiceInput() {
   recognition.addEventListener("error", (event) => {
     state.voice.pendingTargetKey = "";
     state.voice.isListening = false;
-    const shouldDiscard = state.voice.cancelOnEnd;
-    state.voice.cancelOnEnd = false;
-    state.voice.mobileHoldActive = false;
-    state.voice.mobileHoldCanceled = false;
+    const shouldDiscard = state.voice.cancelOnEnd || state.voice.mobileHoldCanceled;
+    resetMobileVoiceHoldState({ keepCancel: shouldDiscard });
     if (shouldDiscard) restoreVoiceDraft();
     updateVoiceButtons();
-    setStatus(state.chat.isAsking ? "查询中" : "在线");
+    setStatus(state.chat.isAsking ? "查询中" : state.app.online ? "在线" : "离线");
     const message = voiceErrorMessage(event?.error);
-    if (message) showToast(message);
+    if (message) {
+      showToast(message);
+      if (event?.error === "not-allowed" || event?.error === "service-not-allowed") {
+        showMicrophoneRecoveryBanner(message);
+      }
+    }
   });
 
   recognition.addEventListener("end", () => {
     state.voice.isListening = false;
-    const shouldDiscard = state.voice.cancelOnEnd;
-    state.voice.cancelOnEnd = false;
-    state.voice.mobileHoldActive = false;
-    state.voice.mobileHoldCanceled = false;
+    const shouldDiscard = state.voice.cancelOnEnd || state.voice.mobileHoldCanceled;
+    resetMobileVoiceHoldState();
     if (shouldDiscard) {
       restoreVoiceDraft();
       showToast("已取消语音输入");
@@ -2382,11 +2458,11 @@ function initVoiceInput() {
     }
     updateVoiceButtons();
     syncDraftState();
-    setStatus(state.chat.isAsking ? "查询中" : "在线");
+    setStatus(state.chat.isAsking ? "查询中" : state.app.online ? "在线" : "离线");
     if (state.voice.pendingTargetKey) {
       const nextTargetKey = state.voice.pendingTargetKey;
       state.voice.pendingTargetKey = "";
-      startVoiceRecognition(nextTargetKey);
+      void startVoiceRecognition(nextTargetKey);
     }
   });
 
@@ -2519,24 +2595,34 @@ function handleVoiceButtonClick(event) {
   const button = event.currentTarget;
   const targetKey = button?.dataset?.target || "questionInput";
   if (button === els.inlineVoiceButton && isMobileViewport()) {
-    if (!state.voice.supported || !state.voice.recognition) {
-      showToast("当前环境暂不支持语音输入，请使用文字描述");
+    if (!state.voice.supported) {
+      if (state.voice.canRequestMicrophone) void requestMicrophonePermission({ force: true });
+      else showToast("当前环境暂不支持语音输入，请使用文字描述");
+      return;
+    }
+    if (state.chat.isAsking) return;
+    if (state.voice.mobileHoldActive) {
+      cancelMobileVoiceHold();
       return;
     }
     toggleVoiceMode();
     return;
   }
   if (!state.voice.supported || !state.voice.recognition) {
+    if (state.voice.canRequestMicrophone) {
+      void requestMicrophonePermission({ force: true });
+      return;
+    }
     showToast("当前环境暂不支持语音输入，请使用文字描述");
     return;
   }
   if (state.chat.isAsking) return;
   if (isMobileHoldVoiceButton(button) && isMobileViewport()) {
     if (state.voice.suppressNextMobileClick) {
-      state.voice.suppressNextMobileClick = false;
+      clearMobileVoiceClickSuppression();
       return;
     }
-    showToast("请长按说话，上滑取消");
+    showToast("按住说话，上滑可取消");
     return;
   }
 
@@ -2551,7 +2637,7 @@ function handleVoiceButtonClick(event) {
     return;
   }
 
-  startVoiceRecognition(targetKey);
+  void startVoiceRecognition(targetKey);
 }
 
 async function askAgent(question, { retry = false } = {}) {
@@ -2596,6 +2682,7 @@ async function askAgent(question, { retry = false } = {}) {
     });
     state.chat.summary = buildHistorySummary();
     renderContext();
+    hideAppBanner("request");
     setStatus("完成");
     requestAnimationFrame(() => els.inlineInput?.focus());
   } catch (error) {
@@ -2610,6 +2697,7 @@ async function askAgent(question, { retry = false } = {}) {
       if (state.app.online) {
         showAppBanner(message, {
           tone: "warning",
+          key: "request",
           actionLabel: "重试查询",
           action: () => askAgent(question, { retry: true })
         });
@@ -2627,15 +2715,20 @@ async function askAgent(question, { retry = false } = {}) {
 function toggleVoiceMode(forceValue) {
   const nextValue = typeof forceValue === "boolean" ? forceValue : !state.isVoiceMode;
   if (state.isVoiceMode === nextValue && isMobileViewport()) {
-    syncVoiceModeUI();
+    updateVoiceButtons();
     return;
   }
   state.isVoiceMode = nextValue;
+  if (!nextValue && state.voice.mobileHoldActive) {
+    cancelMobileVoiceHold();
+    updateVoiceButtons();
+    return;
+  }
   if (!nextValue && state.voice.isListening && state.voice.recognition) {
     state.voice.pendingTargetKey = "";
-    state.voice.recognition.stop();
+    stopVoiceRecognition();
   }
-  syncVoiceModeUI();
+  updateVoiceButtons();
 }
 
 function appendMessage(role, content, options = {}) {
@@ -3290,83 +3383,184 @@ function isMobileViewport() {
 }
 
 function bindMobileVoiceHoldEvents() {
-  [els.mobileVoiceButton, els.mobileInlineVoiceButton].forEach((button) => {
-    if (!button) return;
+  const buttons = [els.mobileVoiceButton, els.mobileInlineVoiceButton].filter(Boolean);
+  const usePointerEvents = "PointerEvent" in window;
 
-    button.addEventListener(
-      "touchstart",
-      (event) => {
-        if (!isMobileViewport()) return;
-        if (!state.voice.supported || !state.voice.recognition) {
-          showToast("当前环境暂不支持语音输入，请使用文字描述");
-          return;
-        }
-        if (state.chat.isAsking) return;
-        const touch = event.changedTouches?.[0];
-        if (!touch) return;
-        event.preventDefault();
-        state.voice.suppressNextMobileClick = true;
-        state.voice.mobileHoldActive = true;
-        state.voice.mobileHoldCanceled = false;
-        state.voice.mobileHoldStartY = touch.clientY;
-        state.voice.cancelOnEnd = false;
-        updateVoiceButtons();
-        startVoiceRecognition(button.dataset.target || "questionInput");
-      },
-      { passive: false }
-    );
-
-    button.addEventListener(
-      "touchmove",
-      (event) => {
-        if (!state.voice.mobileHoldActive || !isMobileViewport()) return;
-        const touch = event.changedTouches?.[0];
-        if (!touch) return;
-        const movedUp = state.voice.mobileHoldStartY - touch.clientY;
-        const shouldCancel = movedUp >= 56;
-        if (state.voice.mobileHoldCanceled !== shouldCancel) {
-          state.voice.mobileHoldCanceled = shouldCancel;
-          updateVoiceButtons();
-        }
-      },
-      { passive: true }
-    );
-
-    const finalizeHold = (event, forceCancel = false) => {
-      if (!state.voice.mobileHoldActive || !isMobileViewport()) return;
-      event?.preventDefault?.();
-      state.voice.suppressNextMobileClick = true;
-      state.voice.cancelOnEnd = forceCancel || state.voice.mobileHoldCanceled;
-      state.voice.mobileHoldActive = false;
-      state.voice.mobileHoldCanceled = forceCancel || state.voice.mobileHoldCanceled;
-      if (state.voice.isListening) {
-        try {
-          state.voice.recognition?.stop();
-        } catch {
-          if (state.voice.cancelOnEnd) {
-            restoreVoiceDraft();
-            showToast("已取消语音输入");
-          }
-          state.voice.cancelOnEnd = false;
-          state.voice.mobileHoldCanceled = false;
-          updateVoiceButtons();
-          syncDraftState();
-        }
-      } else {
-        if (state.voice.cancelOnEnd) {
-          restoreVoiceDraft();
-          showToast("已取消语音输入");
-        }
-        state.voice.cancelOnEnd = false;
-        state.voice.mobileHoldCanceled = false;
-        updateVoiceButtons();
-        syncDraftState();
+  buttons.forEach((button) => {
+    const beginHold = (event) => {
+      if (!isMobileViewport() || state.chat.isAsking || button.disabled) return;
+      if (usePointerEvents && event.pointerType === "mouse" && event.button !== 0) return;
+      if (!state.voice.supported || !state.voice.recognition) {
+        if (state.voice.canRequestMicrophone) void requestMicrophonePermission({ force: true });
+        else showToast("当前环境暂不支持语音输入，请使用文字描述");
+        return;
       }
+      if (state.voice.mobileHoldActive || state.voice.isListening) return;
+      const point = voiceGesturePoint(event);
+      if (!point) return;
+
+      event.preventDefault();
+      markMobileVoiceClickHandled();
+      state.voice.targetKey = button.dataset.target || "questionInput";
+      state.voice.mobileHoldButton = button;
+      state.voice.mobileHoldPointerId = usePointerEvents ? event.pointerId : null;
+      state.voice.mobileHoldActive = true;
+      state.voice.mobileHoldCanceled = false;
+      state.voice.mobileHoldStartY = point.clientY;
+      state.voice.mobileHoldDeltaY = 0;
+      state.voice.mobileHoldPhase = "requesting";
+      state.voice.cancelOnEnd = false;
+      button.style.setProperty("--voice-cancel-progress", "0");
+      if (usePointerEvents && event.pointerId != null) {
+        try {
+          button.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture is a progressive enhancement for older WebViews.
+        }
+      }
+      navigator.vibrate?.(8);
+      updateVoiceButtons();
+      void startVoiceRecognition(state.voice.targetKey, { holdOnly: true });
     };
 
-    button.addEventListener("touchend", (event) => finalizeHold(event, false), { passive: false });
-    button.addEventListener("touchcancel", (event) => finalizeHold(event, true), { passive: false });
+    const moveHold = (event) => {
+      if (!isMobileViewport() || !state.voice.mobileHoldActive || state.voice.mobileHoldButton !== button) return;
+      if (usePointerEvents && event.pointerId !== state.voice.mobileHoldPointerId) return;
+      const point = voiceGesturePoint(event);
+      if (!point) return;
+      event.preventDefault();
+      const deltaY = Math.max(0, state.voice.mobileHoldStartY - point.clientY);
+      const progress = Math.min(deltaY / VOICE_HOLD_CANCEL_THRESHOLD, 1);
+      const shouldCancel = deltaY >= VOICE_HOLD_CANCEL_THRESHOLD;
+      button.style.setProperty("--voice-cancel-progress", progress.toFixed(2));
+      if (state.voice.mobileHoldCanceled !== shouldCancel) {
+        state.voice.mobileHoldCanceled = shouldCancel;
+        state.voice.mobileHoldPhase = shouldCancel ? "canceling" : state.voice.isListening ? "recording" : "requesting";
+        if (shouldCancel) navigator.vibrate?.(12);
+        updateVoiceButtons();
+      }
+      state.voice.mobileHoldDeltaY = deltaY;
+    };
+
+    const finishHold = (event, forceCancel = false) => {
+      if (!isMobileViewport() || !state.voice.mobileHoldActive || state.voice.mobileHoldButton !== button) return;
+      if (usePointerEvents && event.pointerId !== state.voice.mobileHoldPointerId) return;
+      event?.preventDefault?.();
+      markMobileVoiceClickHandled();
+      const canceled = forceCancel || state.voice.mobileHoldCanceled;
+      const recognitionPending = state.voice.isListening || ["starting", "recording"].includes(state.voice.mobileHoldPhase);
+      state.voice.cancelOnEnd = canceled;
+      state.voice.mobileHoldActive = false;
+      state.voice.mobileHoldCanceled = canceled;
+      state.voice.mobileHoldPhase = canceled ? "canceling" : "ending";
+      state.voice.startRequestId += 1;
+      if (usePointerEvents && state.voice.mobileHoldPointerId != null) {
+        try {
+          button.releasePointerCapture(state.voice.mobileHoldPointerId);
+        } catch {
+          // The browser may release capture before pointerup.
+        }
+      }
+      updateVoiceButtons();
+
+      if (recognitionPending) {
+        const stopped = stopVoiceRecognition({ cancel: canceled || !state.voice.isListening });
+        if (!stopped) finishVoiceHoldWithoutRecognition(canceled);
+        return;
+      }
+      finishVoiceHoldWithoutRecognition(canceled);
+    };
+
+    if (usePointerEvents) {
+      button.addEventListener("pointerdown", beginHold, { passive: false });
+      button.addEventListener("pointermove", moveHold, { passive: false });
+      button.addEventListener("pointerup", (event) => finishHold(event, false), { passive: false });
+      button.addEventListener("pointercancel", (event) => finishHold(event, true), { passive: false });
+    } else {
+      button.addEventListener("touchstart", beginHold, { passive: false });
+      button.addEventListener("touchmove", moveHold, { passive: false });
+      button.addEventListener("touchend", (event) => finishHold(event, false), { passive: false });
+      button.addEventListener("touchcancel", (event) => finishHold(event, true), { passive: false });
+    }
+
+    button.addEventListener("contextmenu", (event) => event.preventDefault());
   });
+}
+
+function voiceGesturePoint(event) {
+  if (typeof event?.clientY === "number") return event;
+  return event?.changedTouches?.[0] || event?.touches?.[0] || null;
+}
+
+function markMobileVoiceClickHandled() {
+  state.voice.suppressNextMobileClick = true;
+  window.clearTimeout(state.voice.suppressClickTimer);
+  state.voice.suppressClickTimer = window.setTimeout(clearMobileVoiceClickSuppression, VOICE_CLICK_SUPPRESSION_MS);
+}
+
+function clearMobileVoiceClickSuppression() {
+  window.clearTimeout(state.voice.suppressClickTimer);
+  state.voice.suppressClickTimer = 0;
+  state.voice.suppressNextMobileClick = false;
+}
+
+function resetMobileVoiceHoldState({ keepCancel = false } = {}) {
+  const button = state.voice.mobileHoldButton;
+  const pointerId = state.voice.mobileHoldPointerId;
+  if (button && pointerId != null && button.hasPointerCapture?.(pointerId)) {
+    try {
+      button.releasePointerCapture(pointerId);
+    } catch {
+      // Pointer capture is already gone.
+    }
+  }
+  if (button) button.style.setProperty("--voice-cancel-progress", "0");
+  state.voice.mobileHoldActive = false;
+  state.voice.mobileHoldCanceled = false;
+  state.voice.mobileHoldStartY = 0;
+  state.voice.mobileHoldDeltaY = 0;
+  state.voice.mobileHoldPointerId = null;
+  state.voice.mobileHoldButton = null;
+  state.voice.mobileHoldPhase = "idle";
+  if (!keepCancel) state.voice.cancelOnEnd = false;
+}
+
+function cancelMobileVoiceHold() {
+  if (!state.voice.mobileHoldActive && !state.voice.isListening) return;
+  const recognitionPending = state.voice.isListening || ["starting", "recording"].includes(state.voice.mobileHoldPhase);
+  state.voice.cancelOnEnd = true;
+  state.voice.mobileHoldCanceled = true;
+  state.voice.mobileHoldActive = false;
+  state.voice.mobileHoldPhase = "canceling";
+  state.voice.startRequestId += 1;
+  updateVoiceButtons();
+  if (recognitionPending) {
+    if (!stopVoiceRecognition({ cancel: true })) finishVoiceHoldWithoutRecognition(true);
+    return;
+  }
+  finishVoiceHoldWithoutRecognition(true);
+}
+
+function finishVoiceHoldWithoutRecognition(canceled) {
+  if (canceled) {
+    restoreVoiceDraft();
+    showToast("已取消语音输入");
+  }
+  resetMobileVoiceHoldState();
+  updateVoiceButtons();
+  syncDraftState();
+}
+
+function stopVoiceRecognition({ cancel = false } = {}) {
+  const recognition = state.voice.recognition;
+  if (!recognition) return false;
+  try {
+    if (cancel && typeof recognition.abort === "function") recognition.abort();
+    else recognition.stop();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isMobileHoldVoiceButton(button) {
@@ -3401,21 +3595,87 @@ function syncDraftState() {
   els.inlineSend?.classList.toggle("is-ready", hasInlineDraft && !state.chat.isAsking);
 }
 
-function startVoiceRecognition(targetKey) {
+async function startVoiceRecognition(targetKey, { holdOnly = false } = {}) {
   const input = inputElementByKey(targetKey);
   if (!input || !state.voice.recognition) return;
 
+  const requestId = ++state.voice.startRequestId;
   state.voice.targetKey = targetKey;
   state.voice.baseText = input.value || "";
+  if (holdOnly) state.voice.mobileHoldPhase = "requesting";
   const shouldAvoidMobileFocus = isMobileViewport() && (targetKey === "questionInput" || targetKey === "inlineQuestion");
   if (!(shouldAvoidMobileFocus || (isMobileViewport() && state.isVoiceMode && targetKey === "inlineQuestion"))) {
     input.focus();
   }
   try {
+    await ensureMicrophonePermission();
+    if (requestId !== state.voice.startRequestId || (holdOnly && !state.voice.mobileHoldActive)) return;
+    if (holdOnly) state.voice.mobileHoldPhase = "starting";
     state.voice.recognition.start();
-  } catch {
-    showToast("语音输入暂时没有成功启动，请再点一次试试");
+  } catch (error) {
+    if (requestId !== state.voice.startRequestId) return;
+    state.voice.isListening = false;
+    if (holdOnly) resetMobileVoiceHoldState();
+    updateVoiceButtons();
+    handleMicrophoneFailure(error);
   }
+}
+
+async function requestMicrophonePermission({ force = false } = {}) {
+  try {
+    await ensureMicrophonePermission({ force });
+    hideAppBanner("microphone");
+    showToast(
+      state.voice.supported
+        ? "麦克风权限已允许，请再次点击语音按钮开始说话"
+        : isWeChatBrowser()
+          ? "麦克风权限已允许，但当前微信浏览器不支持网页语音识别，请用 Safari 打开"
+          : "麦克风权限已允许，但当前浏览器不支持网页语音识别，请使用文字输入"
+    );
+  } catch (error) {
+    handleMicrophoneFailure(error);
+  }
+}
+
+async function ensureMicrophonePermission({ force = false } = {}) {
+  if (!force && state.voice.permissionState === "granted") return;
+  const getUserMedia = navigator.mediaDevices?.getUserMedia;
+  if (typeof getUserMedia !== "function") {
+    if (isWeChatBrowser()) throw new Error("微信浏览器无法请求网页麦克风权限，请在 Safari 中打开");
+    return;
+  }
+
+  let stream = null;
+  try {
+    stream = await getUserMedia.call(navigator.mediaDevices, { audio: true });
+    state.voice.permissionState = "granted";
+  } catch (error) {
+    state.voice.permissionState = "denied";
+    throw error;
+  } finally {
+    stream?.getTracks?.().forEach((track) => track.stop());
+  }
+}
+
+function handleMicrophoneFailure(error) {
+  const code = error?.name && error.name !== "Error" ? error.name : error?.message || error;
+  const message = voiceErrorMessage(code);
+  if (!message) return;
+  showToast(message);
+  showMicrophoneRecoveryBanner(message);
+}
+
+function showMicrophoneRecoveryBanner(message) {
+  showAppBanner(message, {
+    tone: "warning",
+    key: "microphone",
+    actionLabel: "重新授权",
+    action: () => requestMicrophonePermission({ force: true })
+  });
+}
+
+function isWeChatBrowser() {
+  return /MicroMessenger/i.test(navigator.userAgent || "");
 }
 
 function inputElementByKey(key) {
@@ -3460,34 +3720,52 @@ function restoreVoiceDraft() {
 
 function updateVoiceButtons() {
   const buttons = [els.voiceInputButton, els.mobileVoiceButton, els.inlineVoiceButton, els.mobileInlineVoiceButton];
+  const voiceAvailable = state.voice.supported || state.voice.canRequestMicrophone;
   for (const button of buttons) {
     if (!button) continue;
     const isInlineModeToggle = button === els.inlineVoiceButton && isMobileViewport();
     const isInlineHoldButton = button === els.mobileInlineVoiceButton && isMobileViewport();
-    button.hidden = isInlineHoldButton ? (!state.voice.supported || !state.isVoiceMode) : !state.voice.supported;
+    button.hidden = isInlineHoldButton ? (!voiceAvailable || !state.isVoiceMode) : !voiceAvailable;
     button.disabled = state.chat.isAsking;
     const isCurrentTarget = button.dataset.target === state.voice.targetKey;
+    const isHoldButton = isMobileHoldVoiceButton(button);
+    const isHoldActive = isHoldButton && state.voice.mobileHoldActive && isCurrentTarget;
+    const isHoldCanceled = isHoldButton && state.voice.mobileHoldCanceled && isCurrentTarget;
+    const isHoldListening = isHoldButton && state.voice.isListening && isCurrentTarget;
     button.classList.toggle("is-listening", state.voice.isListening && isCurrentTarget);
-    button.classList.toggle("is-pressing", isMobileHoldVoiceButton(button) && state.voice.mobileHoldActive && isCurrentTarget && !state.voice.mobileHoldCanceled);
-    button.classList.toggle("is-canceling", isMobileHoldVoiceButton(button) && state.voice.mobileHoldCanceled && isCurrentTarget);
-    button.setAttribute("aria-pressed", state.voice.isListening && isCurrentTarget ? "true" : "false");
+    button.classList.toggle("is-pressing", isHoldActive && !isHoldCanceled && !isHoldListening);
+    button.classList.toggle("is-canceling", isHoldCanceled);
+    button.dataset.voiceState = isHoldCanceled ? "canceling" : isHoldListening ? "listening" : isHoldActive ? "pressing" : "idle";
+    button.setAttribute("aria-pressed", isInlineModeToggle ? (state.isVoiceMode ? "true" : "false") : isHoldActive || (state.voice.isListening && isCurrentTarget) ? "true" : "false");
     button.title = isInlineModeToggle
       ? (state.isVoiceMode ? "切回键盘输入" : "切换到按住说话")
-      : (state.voice.isListening && isCurrentTarget ? "结束语音输入" : "语音输入");
+      : isHoldCanceled
+        ? "松开取消"
+        : isHoldListening
+          ? "松开完成语音输入"
+          : isHoldButton
+            ? "按住说话"
+            : (state.voice.isListening && isCurrentTarget ? "结束语音输入" : "语音输入");
     if (isInlineModeToggle) {
       button.setAttribute("aria-label", state.isVoiceMode ? "切回键盘输入" : "切换到按住说话");
       button.classList.toggle("is-mode-active", state.isVoiceMode);
-      button.innerHTML = state.isVoiceMode ? keyboardIconMarkup() : micIconMarkup();
-    }
-    const label = button.querySelector("span");
-    if (label && button.classList.contains("mobile-voice-cta")) {
-      if (state.voice.mobileHoldCanceled && isCurrentTarget) {
-        label.textContent = "松开取消发送";
-      } else if (state.voice.mobileHoldActive && isCurrentTarget) {
-        label.textContent = "松开发送，上滑取消";
-      } else {
-        label.textContent = "按住说话";
+      const nextMode = state.isVoiceMode ? "keyboard" : "voice";
+      if (button.dataset.modeIcon !== nextMode) {
+        button.dataset.modeIcon = nextMode;
+        button.innerHTML = state.isVoiceMode ? keyboardIconMarkup() : micIconMarkup();
+        button.classList.remove("is-mode-switching");
+        requestAnimationFrame(() => {
+          button.classList.add("is-mode-switching");
+          window.setTimeout(() => button.classList.remove("is-mode-switching"), 240);
+        });
       }
+    }
+    const label = button.querySelector(".voice-cta-label");
+    const hint = button.querySelector(".voice-cta-hint");
+    if (label && isHoldButton) {
+      label.textContent = isHoldCanceled ? "松开取消" : isHoldListening ? "说话中" : isHoldActive ? "正在准备" : "按住说话";
+      if (hint) hint.textContent = isHoldCanceled ? "松开取消本次语音" : isHoldActive || isHoldListening ? "松开完成 · 上滑取消" : "按住后开始识别";
+      button.setAttribute("aria-label", isHoldCanceled ? "松开取消语音输入" : isHoldListening ? "松开完成语音输入" : "按住说话");
     }
   }
   syncVoiceModeUI();
@@ -3495,20 +3773,30 @@ function updateVoiceButtons() {
 
 function syncVoiceModeUI() {
   const mobile = isMobileViewport();
+  const nextMode = mobile && state.isVoiceMode ? "voice" : "keyboard";
+  const previousMode = els.followupInputBar?.dataset.voiceMode || "";
   if (!mobile) {
     state.isVoiceMode = false;
   }
   els.followupInputBar?.removeAttribute("hidden");
   els.followupInputBar?.classList.toggle("is-voice-mode", mobile && state.isVoiceMode);
+  if (els.followupInputBar && previousMode && previousMode !== nextMode) {
+    els.followupInputBar.classList.remove("is-mode-switching");
+    requestAnimationFrame(() => {
+      els.followupInputBar?.classList.add("is-mode-switching");
+      window.setTimeout(() => els.followupInputBar?.classList.remove("is-mode-switching"), 240);
+    });
+  }
+  if (els.followupInputBar) els.followupInputBar.dataset.voiceMode = nextMode;
   if (els.inlineInput) {
-    els.inlineInput.hidden = mobile && state.isVoiceMode;
+    els.inlineInput.hidden = false;
   }
   if (els.inlineSend) {
-    els.inlineSend.hidden = mobile && state.isVoiceMode;
+    els.inlineSend.hidden = false;
   }
   if (els.mobileInlineVoiceButton) {
-    els.mobileInlineVoiceButton.hidden = !(mobile && state.isVoiceMode && state.voice.supported);
-    els.mobileInlineVoiceButton.style.display = mobile && state.isVoiceMode && state.voice.supported ? "" : "none";
+    els.mobileInlineVoiceButton.hidden = !(mobile && state.voice.supported);
+    els.mobileInlineVoiceButton.style.display = "";
   }
 }
 
@@ -3648,19 +3936,29 @@ function keyboardIconMarkup() {
 }
 
 function voiceErrorMessage(code) {
-  if (code === "not-allowed" || code === "service-not-allowed") {
-    return "没有拿到麦克风权限，请先允许浏览器使用麦克风";
+  const normalizedCode = String(code || "").toLowerCase();
+  if (/notallowederror|not-allowed|service-not-allowed|permission denied|微信浏览器无法/.test(normalizedCode)) {
+    if (state.voice.permissionState === "granted" && isWeChatBrowser()) {
+      return "麦克风权限已开启，但微信内置浏览器限制了网页语音识别，请点右上角“…”选择在 Safari 中打开";
+    }
+    if (isWeChatBrowser()) {
+      return "微信浏览器没有把麦克风权限交给当前页面，请点击“重新授权”，或点右上角“…”选择在 Safari 中打开";
+    }
+    return "没有拿到麦克风权限，请点击“重新授权”允许浏览器使用麦克风";
   }
-  if (code === "audio-capture") {
+  if (normalizedCode === "audiocapture" || normalizedCode === "audio-capture") {
     return "没有检测到可用麦克风，请检查手机或浏览器权限";
   }
-  if (code === "no-speech") {
+  if (normalizedCode === "nospeech" || normalizedCode === "no-speech") {
     return "没有听到清晰语音，请再试一次";
   }
-  if (code === "network") {
+  if (normalizedCode === "network") {
     return "语音识别网络有点不稳，请稍后重试";
   }
-  if (code === "aborted") return "";
+  if (normalizedCode === "aborted") return "";
+  if (/微信浏览器无法请求/.test(String(code || ""))) {
+    return "微信浏览器无法弹出网页麦克风授权，请点右上角“…”选择在 Safari 中打开";
+  }
   return "当前环境暂不支持语音输入，请使用文字描述";
 }
 

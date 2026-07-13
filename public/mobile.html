@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>高德 AI 地图助手 - Mobile</title>
-    <link rel="stylesheet" href="/styles.css?v=20260712-phase4-stable" />
+    <link rel="stylesheet" href="/styles.css?v=20260713-permission-recovery" />
   </head>
   <body class="mobile-page">
     <div class="app-status-banner" id="appStatusBanner" role="status" aria-live="polite" hidden>
@@ -56,6 +56,24 @@
           </button>
           <button class="send-fab" type="submit" aria-label="发送">➤</button>
         </form>
+        <button class="mobile-voice-cta" id="mobileVoiceButton" type="button" aria-label="按住说话" title="按住说话" data-target="questionInput" hidden>
+          <span class="voice-cta-leading" aria-hidden="true">
+            <svg class="voice-icon mobile-voice-icon voice-cta-mic" viewBox="0 0 24 24">
+              <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+              <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+              <path d="M12 17v3" />
+              <path d="M9 20h6" />
+            </svg>
+            <svg class="voice-cancel-icon" viewBox="0 0 24 24">
+              <path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
+            </svg>
+          </span>
+          <span class="voice-cta-copy">
+            <span class="voice-cta-label">按住说话</span>
+            <span class="voice-cta-hint">松开完成 · 上滑取消</span>
+          </span>
+          <span class="voice-cta-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        </button>
         <div class="quick-prompts" id="quickPrompts"></div>
         <div class="search-hint" id="searchHint">💡 提示：您可以试着输入“您当前所在位置附近有什么电影院？”</div>
       </section>
@@ -109,9 +127,27 @@
           </svg>
         </button>
         <button id="inlineSend" type="button">➤</button>
+        <button class="mobile-voice-cta mobile-voice-cta-inline" id="mobileInlineVoiceButton" type="button" aria-label="按住说话" title="按住说话" data-target="inlineQuestion" hidden>
+          <span class="voice-cta-leading" aria-hidden="true">
+            <svg class="voice-icon mobile-voice-icon voice-cta-mic" viewBox="0 0 24 24">
+              <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-4a3.5 3.5 0 1 0-7 0v4A3.5 3.5 0 0 0 12 15Z" />
+              <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+              <path d="M12 17v3" />
+              <path d="M9 20h6" />
+            </svg>
+            <svg class="voice-cancel-icon" viewBox="0 0 24 24">
+              <path d="M12 19V5M7.5 9.5 12 5l4.5 4.5" />
+            </svg>
+          </span>
+          <span class="voice-cta-copy">
+            <span class="voice-cta-label">按住说话</span>
+            <span class="voice-cta-hint">松开完成 · 上滑取消</span>
+          </span>
+          <span class="voice-cta-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        </button>
       </footer>
     </main>
 
-    <script src="/app.js?v=20260712-phase4-stable" type="module"></script>
+    <script src="/app.js?v=20260713-voice-ux" type="module"></script>
   </body>
 </html>

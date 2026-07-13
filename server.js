@@ -299,6 +299,34 @@ async function answerWithAmapV2(question, session = {}, options = {}) {
 
   if (plan.intent === "nearby") {
     const origin = await resolveNearbyOrigin(plan, session.context || {}, question);
+    if (!origin?.location) {
+      const message = `我没有找到名称明确匹配“${plan.address}”的地点，因此没有把相近但不同名的地点当作结果。请补充城市或检查名称后再试。`;
+      return maybeFinalizeAgentResponse({
+        intent: "nearby",
+        planner: plan.planner,
+        question,
+        city: plan.city,
+        analysis: message,
+        answer: message,
+        map: {
+          mode: "pois",
+          center: defaultCityCenter(plan.city),
+          radius: plan.radius,
+          markers: [],
+          legends: []
+        },
+        data: {
+          plan,
+          origin: null,
+          lookupFallback: null,
+          radius: plan.radius,
+          pois: [],
+          allPois: []
+        },
+        source: "DeepSeek/规则解析 + 高德名称可信度校验",
+        context: buildNextContext({ question, plan })
+      }, session, options);
+    }
     const responsePlan = origin.resolvedOutsideCity && origin.city
       ? { ...plan, city: origin.city }
       : plan;
@@ -650,7 +678,12 @@ function normalizePlan(rawPlan, question, session = {}) {
 
   if (intent === "nearby") {
     const parsed = parseNearbyQuestion(question, context);
-    plan.address = cleanupPlace(contextualNearby ? (parsed.address || context.lastAddress) : (rawPlan.address || parsed.address || context.lastAddress));
+    const explicitNearbyAddress = extractExplicitNearbyAddress(question);
+    plan.address = cleanupPlace(
+      contextualNearby
+        ? (parsed.address || context.lastAddress)
+        : (explicitNearbyAddress || rawPlan.address || parsed.address || context.lastAddress)
+    );
     plan.keywords = normalizeKnownBrandKeyword(question, normalizeNearbyKeywords(rawPlan.keywords, parsed.keywords));
     plan.radius = isNearestPlaceQuery(question)
       ? clampRadius(rawPlan.radius || 50000, 2000, 50000, 50000)
@@ -2000,7 +2033,8 @@ async function resolveNearbyOrigin(plan, context = {}, question = "") {
     };
   }
   return resolvePlaceAnchor(plan.address, plan.city, {
-    allowNationwideFallback: !containsExplicitCity(question)
+    allowNationwideFallback: !containsExplicitCity(question),
+    requireCredibleMatch: true
   });
 }
 
@@ -2218,7 +2252,12 @@ async function resolvePlaceAnchor(address, city = "", options = {}) {
       };
     }
   }
-  return geocode(address, city);
+  const geocoded = await geocode(address, city).catch((error) => {
+    if (options.requireCredibleMatch) return null;
+    throw error;
+  });
+  if (options.requireCredibleMatch && (!geocoded || !isCredibleGeocodeMatch(address, geocoded))) return null;
+  return geocoded;
 }
 
 function placeAnchorFromPoi(poi, fallbackCity = "") {
@@ -2247,7 +2286,7 @@ function compactAddressParts(parts) {
 }
 
 function chooseBestAnchorPoi(address, city, pois) {
-  const normalizedAddress = normalizeLooseText(address);
+  const normalizedAddress = normalizePlaceQuery(address);
   const normalizedCity = normalizeLooseText(city);
   if (!pois.length) return null;
   const scored = pois.map((poi) => {
@@ -2264,10 +2303,27 @@ function chooseBestAnchorPoi(address, city, pois) {
 }
 
 function filterCrediblePlaceMatches(keywords, pois) {
-  const normalizedKeywords = normalizeLooseText(keywords);
+  const normalizedKeywords = normalizePlaceQuery(keywords);
   return (pois || []).filter((poi) =>
     placeNameMatchScore(normalizedKeywords, normalizeLooseText(poi.name)) > 0 && !isAncillaryPlacePoi(poi)
   );
+}
+
+function extractExplicitNearbyAddress(question) {
+  const rawAddress = String(question || "").match(/(.+?)(?:附近|周边|旁边|周围)/)?.[1];
+  if (!rawAddress) return "";
+  return cleanupPlace(rawAddress.replace(/^(请问|帮我|请|查询|查一下|找一下)/, "").trim());
+}
+
+function normalizePlaceQuery(value) {
+  return normalizeLooseText(String(value || "").replace(/^(?:上海市?|北京市?|天津市?|重庆市?|广州市?|深圳市?|杭州市?|南京市?|苏州市?|成都市?|武汉市?|西安市?|金华市?|义乌市?|泉州市?|厦门市?|福州市?|宁波市?|温州市?)/, ""));
+}
+
+function isCredibleGeocodeMatch(query, geocoded) {
+  const normalizedQuery = normalizePlaceQuery(query);
+  const normalizedAddress = normalizePlaceQuery(geocoded?.formattedAddress || "");
+  if (!normalizedQuery || !normalizedAddress) return false;
+  return normalizedAddress.includes(normalizedQuery) || normalizedQuery.includes(normalizedAddress);
 }
 
 function isAncillaryPlacePoi(poi) {
