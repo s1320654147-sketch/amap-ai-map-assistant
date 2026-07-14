@@ -14,6 +14,7 @@ const els = {
   inspireButton: $("#inspireButton"),
   voiceInputButton: $("#voiceInputButton"),
   mobileVoiceButton: $("#mobileVoiceButton"),
+  mobileKeyboardButton: $("#mobileKeyboardButton"),
   inlineInput: $("#inlineQuestion"),
   inlineInspireButton: $("#inlineInspireButton"),
   inlineVoiceButton: $("#inlineVoiceButton"),
@@ -424,6 +425,7 @@ function bindEvents() {
   els.inlineInspireButton?.addEventListener("click", handleAiDiscoveryClick);
   els.voiceInputButton?.addEventListener("click", handleVoiceButtonClick);
   els.mobileVoiceButton?.addEventListener("click", handleVoiceButtonClick);
+  els.mobileKeyboardButton?.addEventListener("click", focusMobileKeyboardInput);
   els.inlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
   els.mobileInlineVoiceButton?.addEventListener("click", handleVoiceButtonClick);
   els.chatPanelToggle?.addEventListener("click", () => toggleChatCollapsed());
@@ -2609,6 +2611,10 @@ function handleVoiceButtonClick(event) {
     return;
   }
   if (!state.voice.supported || !state.voice.recognition) {
+    if (isWeChatBrowser()) {
+      showToast("当前版本在微信内无法使用网页语音识别，请使用文字输入，或在 Safari 中打开");
+      return;
+    }
     if (state.voice.canRequestMicrophone) {
       void requestMicrophonePermission({ force: true });
       return;
@@ -2638,6 +2644,19 @@ function handleVoiceButtonClick(event) {
   }
 
   void startVoiceRecognition(targetKey);
+}
+
+function focusMobileKeyboardInput(event) {
+  if (!isMobileViewport()) return;
+  event?.preventDefault?.();
+  if (state.voice.mobileHoldActive || state.voice.isListening) cancelMobileVoiceHold();
+  const targetKey = event?.currentTarget?.dataset?.target || "questionInput";
+  const input = inputElementByKey(targetKey);
+  if (!input) return;
+  requestAnimationFrame(() => {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange?.(input.value.length, input.value.length);
+  });
 }
 
 async function askAgent(question, { retry = false } = {}) {
@@ -3391,7 +3410,9 @@ function bindMobileVoiceHoldEvents() {
       if (!isMobileViewport() || state.chat.isAsking || button.disabled) return;
       if (usePointerEvents && event.pointerType === "mouse" && event.button !== 0) return;
       if (!state.voice.supported || !state.voice.recognition) {
-        if (state.voice.canRequestMicrophone) void requestMicrophonePermission({ force: true });
+        if (isWeChatBrowser()) {
+          showToast("当前版本在微信内无法使用网页语音识别，请使用文字输入，或在 Safari 中打开");
+        } else if (state.voice.canRequestMicrophone) void requestMicrophonePermission({ force: true });
         else showToast("当前环境暂不支持语音输入，请使用文字描述");
         return;
       }
@@ -3622,6 +3643,10 @@ async function startVoiceRecognition(targetKey, { holdOnly = false } = {}) {
 }
 
 async function requestMicrophonePermission({ force = false } = {}) {
+  if (!state.voice.supported && isWeChatBrowser()) {
+    showToast("微信内可以通过微信 JS-SDK 实现语音，但当前版本使用的网页语音识别接口在微信中不可用");
+    return;
+  }
   try {
     await ensureMicrophonePermission({ force });
     hideAppBanner("microphone");
@@ -3721,6 +3746,10 @@ function restoreVoiceDraft() {
 function updateVoiceButtons() {
   const buttons = [els.voiceInputButton, els.mobileVoiceButton, els.inlineVoiceButton, els.mobileInlineVoiceButton];
   const voiceAvailable = state.voice.supported || state.voice.canRequestMicrophone;
+  if (els.mobileKeyboardButton) {
+    els.mobileKeyboardButton.hidden = !(isMobileViewport() && voiceAvailable);
+    els.mobileKeyboardButton.disabled = state.chat.isAsking;
+  }
   for (const button of buttons) {
     if (!button) continue;
     const isInlineModeToggle = button === els.inlineVoiceButton && isMobileViewport();
@@ -3729,12 +3758,14 @@ function updateVoiceButtons() {
     button.disabled = state.chat.isAsking;
     const isCurrentTarget = button.dataset.target === state.voice.targetKey;
     const isHoldButton = isMobileHoldVoiceButton(button);
+    const isVoiceUnavailable = isHoldButton && !state.voice.supported;
     const isHoldActive = isHoldButton && state.voice.mobileHoldActive && isCurrentTarget;
     const isHoldCanceled = isHoldButton && state.voice.mobileHoldCanceled && isCurrentTarget;
     const isHoldListening = isHoldButton && state.voice.isListening && isCurrentTarget;
     button.classList.toggle("is-listening", state.voice.isListening && isCurrentTarget);
     button.classList.toggle("is-pressing", isHoldActive && !isHoldCanceled && !isHoldListening);
     button.classList.toggle("is-canceling", isHoldCanceled);
+    button.classList.toggle("is-unavailable", isVoiceUnavailable);
     button.dataset.voiceState = isHoldCanceled ? "canceling" : isHoldListening ? "listening" : isHoldActive ? "pressing" : "idle";
     button.setAttribute("aria-pressed", isInlineModeToggle ? (state.isVoiceMode ? "true" : "false") : isHoldActive || (state.voice.isListening && isCurrentTarget) ? "true" : "false");
     button.title = isInlineModeToggle
@@ -3763,9 +3794,34 @@ function updateVoiceButtons() {
     const label = button.querySelector(".voice-cta-label");
     const hint = button.querySelector(".voice-cta-hint");
     if (label && isHoldButton) {
-      label.textContent = isHoldCanceled ? "松开取消" : isHoldListening ? "说话中" : isHoldActive ? "正在准备" : "按住说话";
-      if (hint) hint.textContent = isHoldCanceled ? "松开取消本次语音" : isHoldActive || isHoldListening ? "松开完成 · 上滑取消" : "按住后开始识别";
-      button.setAttribute("aria-label", isHoldCanceled ? "松开取消语音输入" : isHoldListening ? "松开完成语音输入" : "按住说话");
+      label.textContent = isVoiceUnavailable
+        ? (isWeChatBrowser() ? "微信内暂不支持语音" : "当前浏览器暂不支持语音")
+        : isHoldCanceled
+          ? "松开取消"
+          : isHoldListening
+            ? "说话中"
+            : isHoldActive
+              ? "正在准备"
+              : "按住说话";
+      if (hint) {
+        hint.textContent = isVoiceUnavailable
+          ? "请使用右侧键盘输入"
+          : isHoldCanceled
+            ? "松开取消本次语音"
+            : isHoldActive || isHoldListening
+              ? "松开完成 · 上滑取消"
+              : "按住后开始识别";
+      }
+      button.setAttribute(
+        "aria-label",
+        isVoiceUnavailable
+          ? "当前环境暂不支持网页语音识别，点击了解"
+          : isHoldCanceled
+            ? "松开取消语音输入"
+            : isHoldListening
+              ? "松开完成语音输入"
+              : "按住说话"
+      );
     }
   }
   syncVoiceModeUI();
@@ -3939,10 +3995,10 @@ function voiceErrorMessage(code) {
   const normalizedCode = String(code || "").toLowerCase();
   if (/notallowederror|not-allowed|service-not-allowed|permission denied|微信浏览器无法/.test(normalizedCode)) {
     if (state.voice.permissionState === "granted" && isWeChatBrowser()) {
-      return "麦克风权限已开启，但微信内置浏览器限制了网页语音识别，请点右上角“…”选择在 Safari 中打开";
+      return "麦克风权限已开启，但当前版本使用的网页语音识别接口在微信中不可用，请使用文字输入或在 Safari 中打开";
     }
     if (isWeChatBrowser()) {
-      return "微信浏览器没有把麦克风权限交给当前页面，请点击“重新授权”，或点右上角“…”选择在 Safari 中打开";
+      return "微信内的麦克风权限与网页语音识别是两项能力；当前版本请使用文字输入或在 Safari 中打开";
     }
     return "没有拿到麦克风权限，请点击“重新授权”允许浏览器使用麦克风";
   }
