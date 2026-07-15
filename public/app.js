@@ -3799,7 +3799,7 @@ function updateVoiceButtons() {
         : isHoldCanceled
           ? "松开取消"
           : isHoldListening
-            ? "说话中"
+            ? "正在录音"
             : isHoldActive
               ? "正在准备"
               : "按住说话";
