@@ -17,6 +17,10 @@ services:
         sync: false
       - key: DEEPSEEK_API_KEY
         sync: false
+      - key: WECHAT_APP_ID
+        sync: false
+      - key: WECHAT_APP_SECRET
+        sync: false
       - key: DEEPSEEK_MODEL
         value: deepseek-v4-flash
       - key: DEEPSEEK_BASE_URL
