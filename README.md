@@ -16,9 +16,13 @@ AMAP_SECURITY_JS_CODE=你的高德JSAPI安全密钥
 DEEPSEEK_API_KEY=你的DeepSeekAPIKey
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+WECHAT_APP_ID=你的微信公众号或服务号AppID
+WECHAT_APP_SECRET=你的微信公众号或服务号AppSecret
 PORT=5177
 AMAP_MIN_INTERVAL_MS=350
 ```
+
+微信内置浏览器的按住说话使用微信 JS-SDK。除配置上述两个服务端环境变量外，还需要在微信公众平台把正式站点域名加入「JS接口安全域名」。`WECHAT_APP_SECRET` 只能保存在服务端或部署平台 Secret 中，不能写入前端代码。
 
 5. 在当前目录运行：
 
