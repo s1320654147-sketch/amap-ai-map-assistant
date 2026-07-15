@@ -157,7 +157,11 @@ const state = {
   },
   voice: {
     supported: false,
+    provider: "",
     canRequestMicrophone: false,
+    wechatLoading: false,
+    wechatConfigError: "",
+    wechatLocalId: "",
     permissionState: "unknown",
     startRequestId: 0,
     isListening: false,
@@ -179,6 +183,7 @@ const state = {
 };
 
 let map = null;
+let wechatVoiceInitPromise = null;
 const mapRuntime = {
   overlays: {
     base: [],
@@ -2407,7 +2412,12 @@ async function handleSuggestedQuestion(question) {
 
 function initVoiceInput() {
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-  state.voice.canRequestMicrophone = Boolean(navigator.mediaDevices?.getUserMedia);
+  state.voice.canRequestMicrophone = Boolean(navigator.mediaDevices?.getUserMedia) || isWeChatBrowser();
+  if (isWeChatBrowser()) {
+    updateVoiceButtons();
+    void initWeChatVoiceInput();
+    return;
+  }
   if (!SpeechRecognitionCtor) {
     updateVoiceButtons();
     return;
@@ -2469,8 +2479,231 @@ function initVoiceInput() {
   });
 
   state.voice.supported = true;
+  state.voice.provider = "web-speech";
   state.voice.recognition = recognition;
   updateVoiceButtons();
+}
+
+async function initWeChatVoiceInput({ force = false } = {}) {
+  if (!isWeChatBrowser()) return false;
+  if (state.voice.provider === "wechat-jssdk" && state.voice.supported && !force) return true;
+  if (wechatVoiceInitPromise) return wechatVoiceInitPromise;
+
+  state.voice.wechatLoading = true;
+  state.voice.wechatConfigError = "";
+  updateVoiceButtons();
+  wechatVoiceInitPromise = (async () => {
+    try {
+      await loadWeChatJssdk();
+      const signedUrl = window.location.href.split("#")[0];
+      const response = await fetchWithTimeout(
+        `/api/wechat/jssdk-config?url=${encodeURIComponent(signedUrl)}`,
+        {},
+        15000,
+        "微信语音初始化"
+      );
+      const config = await response.json().catch(() => ({}));
+      if (!response.ok || !config.ok) throw new Error(config.error || "微信语音签名获取失败");
+      await configureWeChatJssdk(config);
+      state.voice.provider = "wechat-jssdk";
+      state.voice.permissionState = "granted";
+      state.voice.supported = true;
+      state.voice.recognition = createWeChatRecognitionAdapter();
+      bindWeChatVoiceRecordEnd();
+      hideAppBanner("microphone");
+      return true;
+    } catch (error) {
+      state.voice.supported = false;
+      state.voice.provider = "";
+      state.voice.recognition = null;
+      state.voice.wechatConfigError = cleanText(error?.message || error) || "微信语音初始化失败";
+      return false;
+    } finally {
+      state.voice.wechatLoading = false;
+      wechatVoiceInitPromise = null;
+      updateVoiceButtons();
+    }
+  })();
+  return wechatVoiceInitPromise;
+}
+
+function loadWeChatJssdk() {
+  if (window.wx?.config) return Promise.resolve();
+  const existing = document.querySelector('script[data-wechat-jssdk="true"]');
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error("微信 JS-SDK 加载超时")), 12000);
+      existing.addEventListener("load", () => {
+        window.clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      existing.addEventListener("error", () => {
+        window.clearTimeout(timer);
+        reject(new Error("微信 JS-SDK 加载失败"));
+      }, { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    const timer = window.setTimeout(() => {
+      script.remove();
+      reject(new Error("微信 JS-SDK 加载超时"));
+    }, 12000);
+    script.src = "https://res.wx.qq.com/open/js/jweixin-1.6.0.js";
+    script.async = true;
+    script.dataset.wechatJssdk = "true";
+    script.addEventListener("load", () => {
+      window.clearTimeout(timer);
+      resolve();
+    }, { once: true });
+    script.addEventListener("error", () => {
+      window.clearTimeout(timer);
+      reject(new Error("微信 JS-SDK 加载失败"));
+    }, { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+function configureWeChatJssdk(config) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("微信 JS-SDK 初始化超时")), 12000);
+    window.wx.ready(() => {
+      window.clearTimeout(timer);
+      resolve();
+    });
+    window.wx.error((error) => {
+      window.clearTimeout(timer);
+      reject(new Error(error?.errMsg || "微信 JS-SDK 签名校验失败"));
+    });
+    window.wx.config({
+      debug: false,
+      appId: config.appId,
+      timestamp: config.timestamp,
+      nonceStr: config.nonceStr,
+      signature: config.signature,
+      jsApiList: ["startRecord", "stopRecord", "onVoiceRecordEnd", "translateVoice"]
+    });
+  });
+}
+
+function createWeChatRecognitionAdapter() {
+  return {
+    start() {
+      startWeChatRecording();
+    },
+    stop() {
+      stopWeChatRecording(false);
+    },
+    abort() {
+      stopWeChatRecording(true);
+    }
+  };
+}
+
+function startWeChatRecording() {
+  if (!window.wx?.startRecord) {
+    handleWeChatVoiceFailure(new Error("微信录音接口尚未就绪"));
+    return;
+  }
+  window.wx.startRecord({
+    success() {
+      state.voice.isListening = true;
+      state.voice.mobileHoldPhase = "recording";
+      updateVoiceButtons();
+      setStatus("语音输入中");
+      if (!state.voice.mobileHoldActive && state.voice.cancelOnEnd) stopWeChatRecording(true);
+    },
+    cancel() {
+      handleWeChatVoiceFailure(new Error("用户拒绝了微信录音授权"));
+    },
+    fail(error) {
+      handleWeChatVoiceFailure(error);
+    }
+  });
+}
+
+function stopWeChatRecording(canceled) {
+  if (!window.wx?.stopRecord) return false;
+  window.wx.stopRecord({
+    success(result) {
+      state.voice.isListening = false;
+      const shouldDiscard = canceled || state.voice.cancelOnEnd || state.voice.mobileHoldCanceled;
+      if (shouldDiscard) {
+        restoreVoiceDraft();
+        resetMobileVoiceHoldState();
+        updateVoiceButtons();
+        syncDraftState();
+        showToast("已取消语音输入");
+        return;
+      }
+      const localId = cleanText(result?.localId);
+      if (!localId) {
+        handleWeChatVoiceFailure(new Error("微信没有返回有效录音"));
+        return;
+      }
+      state.voice.wechatLocalId = localId;
+      state.voice.mobileHoldPhase = "transcribing";
+      updateVoiceButtons();
+      translateWeChatVoice(localId);
+    },
+    fail(error) {
+      handleWeChatVoiceFailure(error);
+    }
+  });
+  return true;
+}
+
+function translateWeChatVoice(localId) {
+  window.wx.translateVoice({
+    localId,
+    isShowProgressTips: 0,
+    success(result) {
+      const transcript = normalizeSpeechText(result?.translateResult).replace(/[。！!，,]+$/, "");
+      if (transcript) {
+        applyVoiceTranscript({ finalText: transcript });
+        showToast("语音已转成文字");
+      } else {
+        showToast("没有听清，请再说一次");
+      }
+      state.voice.wechatLocalId = "";
+      resetMobileVoiceHoldState();
+      if (isMobileViewport() && state.isVoiceMode) toggleVoiceMode(false);
+      updateVoiceButtons();
+      syncDraftState();
+      setStatus(state.app.online ? "在线" : "离线");
+    },
+    fail(error) {
+      handleWeChatVoiceFailure(error);
+    }
+  });
+}
+
+function bindWeChatVoiceRecordEnd() {
+  window.wx?.onVoiceRecordEnd?.({
+    complete(result) {
+      state.voice.isListening = false;
+      if (state.voice.cancelOnEnd || state.voice.mobileHoldCanceled) {
+        restoreVoiceDraft();
+        resetMobileVoiceHoldState();
+        updateVoiceButtons();
+        return;
+      }
+      const localId = cleanText(result?.localId);
+      if (localId) translateWeChatVoice(localId);
+      else handleWeChatVoiceFailure(new Error("微信录音已结束，但没有返回有效录音"));
+    }
+  });
+}
+
+function handleWeChatVoiceFailure(error) {
+  state.voice.isListening = false;
+  restoreVoiceDraft();
+  resetMobileVoiceHoldState();
+  updateVoiceButtons();
+  syncDraftState();
+  const message = cleanText(error?.errMsg || error?.message || error) || "微信语音暂时不可用，请稍后重试";
+  showToast(message.includes("permission") || message.includes("授权") ? "请允许微信使用麦克风后重试" : "微信语音暂时不可用，请稍后重试");
+  showMicrophoneRecoveryBanner("微信语音没有成功启动，请点击重新授权后再试");
 }
 
 function resetContext() {
@@ -2612,7 +2845,8 @@ function handleVoiceButtonClick(event) {
   }
   if (!state.voice.supported || !state.voice.recognition) {
     if (isWeChatBrowser()) {
-      showToast("当前版本在微信内无法使用网页语音识别，请使用文字输入，或在 Safari 中打开");
+      if (state.voice.wechatLoading) showToast("微信语音正在初始化，请稍后再试");
+      else void requestMicrophonePermission({ force: true });
       return;
     }
     if (state.voice.canRequestMicrophone) {
@@ -2653,10 +2887,8 @@ function focusMobileKeyboardInput(event) {
   const targetKey = event?.currentTarget?.dataset?.target || "questionInput";
   const input = inputElementByKey(targetKey);
   if (!input) return;
-  requestAnimationFrame(() => {
-    input.focus({ preventScroll: true });
-    input.setSelectionRange?.(input.value.length, input.value.length);
-  });
+  input.focus({ preventScroll: true });
+  input.setSelectionRange?.(input.value.length, input.value.length);
 }
 
 async function askAgent(question, { retry = false } = {}) {
@@ -3411,7 +3643,11 @@ function bindMobileVoiceHoldEvents() {
       if (usePointerEvents && event.pointerType === "mouse" && event.button !== 0) return;
       if (!state.voice.supported || !state.voice.recognition) {
         if (isWeChatBrowser()) {
-          showToast("当前版本在微信内无法使用网页语音识别，请使用文字输入，或在 Safari 中打开");
+          if (state.voice.wechatLoading) showToast("微信语音正在初始化，请稍后再按住说话");
+          else {
+            showToast(state.voice.wechatConfigError || "正在重新连接微信语音");
+            void initWeChatVoiceInput({ force: true });
+          }
         } else if (state.voice.canRequestMicrophone) void requestMicrophonePermission({ force: true });
         else showToast("当前环境暂不支持语音输入，请使用文字描述");
         return;
@@ -3629,7 +3865,7 @@ async function startVoiceRecognition(targetKey, { holdOnly = false } = {}) {
     input.focus();
   }
   try {
-    await ensureMicrophonePermission();
+    if (state.voice.provider !== "wechat-jssdk") await ensureMicrophonePermission();
     if (requestId !== state.voice.startRequestId || (holdOnly && !state.voice.mobileHoldActive)) return;
     if (holdOnly) state.voice.mobileHoldPhase = "starting";
     state.voice.recognition.start();
@@ -3643,8 +3879,16 @@ async function startVoiceRecognition(targetKey, { holdOnly = false } = {}) {
 }
 
 async function requestMicrophonePermission({ force = false } = {}) {
-  if (!state.voice.supported && isWeChatBrowser()) {
-    showToast("微信内可以通过微信 JS-SDK 实现语音，但当前版本使用的网页语音识别接口在微信中不可用");
+  if (isWeChatBrowser()) {
+    const ready = await initWeChatVoiceInput({ force });
+    if (ready) {
+      hideAppBanner("microphone");
+      showToast("微信语音已就绪，请按住说话");
+    } else {
+      const message = state.voice.wechatConfigError || "微信语音初始化失败，请稍后重试";
+      showToast(message);
+      showMicrophoneRecoveryBanner(message);
+    }
     return;
   }
   try {
@@ -3745,7 +3989,7 @@ function restoreVoiceDraft() {
 
 function updateVoiceButtons() {
   const buttons = [els.voiceInputButton, els.mobileVoiceButton, els.inlineVoiceButton, els.mobileInlineVoiceButton];
-  const voiceAvailable = state.voice.supported || state.voice.canRequestMicrophone;
+  const voiceAvailable = state.voice.supported || state.voice.canRequestMicrophone || isWeChatBrowser();
   if (els.mobileKeyboardButton) {
     els.mobileKeyboardButton.hidden = !(isMobileViewport() && voiceAvailable);
     els.mobileKeyboardButton.disabled = state.chat.isAsking;
@@ -3758,7 +4002,7 @@ function updateVoiceButtons() {
     button.disabled = state.chat.isAsking;
     const isCurrentTarget = button.dataset.target === state.voice.targetKey;
     const isHoldButton = isMobileHoldVoiceButton(button);
-    const isVoiceUnavailable = isHoldButton && !state.voice.supported;
+    const isVoiceUnavailable = isHoldButton && !state.voice.supported && !state.voice.wechatLoading;
     const isHoldActive = isHoldButton && state.voice.mobileHoldActive && isCurrentTarget;
     const isHoldCanceled = isHoldButton && state.voice.mobileHoldCanceled && isCurrentTarget;
     const isHoldListening = isHoldButton && state.voice.isListening && isCurrentTarget;
@@ -3794,9 +4038,13 @@ function updateVoiceButtons() {
     const label = button.querySelector(".voice-cta-label");
     const hint = button.querySelector(".voice-cta-hint");
     if (label && isHoldButton) {
-      label.textContent = isVoiceUnavailable
-        ? (isWeChatBrowser() ? "微信内暂不支持语音" : "当前浏览器暂不支持语音")
-        : isHoldCanceled
+      label.textContent = state.voice.wechatLoading
+        ? "正在连接微信语音"
+        : state.voice.mobileHoldPhase === "transcribing"
+          ? "正在转文字"
+          : isVoiceUnavailable
+            ? (isWeChatBrowser() ? "微信语音需要配置" : "当前浏览器暂不支持语音")
+            : isHoldCanceled
           ? "松开取消"
           : isHoldListening
             ? "正在录音"
@@ -3804,9 +4052,13 @@ function updateVoiceButtons() {
               ? "正在准备"
               : "按住说话";
       if (hint) {
-        hint.textContent = isVoiceUnavailable
-          ? "请使用右侧键盘输入"
-          : isHoldCanceled
+        hint.textContent = state.voice.wechatLoading
+          ? "首次加载可能需要几秒"
+          : state.voice.mobileHoldPhase === "transcribing"
+            ? "请稍候"
+            : isVoiceUnavailable
+              ? (isWeChatBrowser() ? "点击后重新连接" : "请使用右侧键盘输入")
+              : isHoldCanceled
             ? "松开取消本次语音"
             : isHoldActive || isHoldListening
               ? "松开完成 · 上滑取消"
