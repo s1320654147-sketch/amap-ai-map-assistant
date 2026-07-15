@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -26,6 +27,8 @@ const OUTBOUND_FETCH_RETRY_BACKOFF_MS = Number(process.env.OUTBOUND_FETCH_RETRY_
 const SEARCH_COUNT_MAX_PAGES = Number(process.env.SEARCH_COUNT_MAX_PAGES || 20);
 let nextAmapRequestAt = 0;
 let amapQueue = Promise.resolve();
+let wechatAccessTokenCache = { value: "", expiresAt: 0 };
+let wechatJsapiTicketCache = { value: "", expiresAt: 0 };
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -61,6 +64,11 @@ server.listen(PORT, HOST, () => {
 async function handleApi(req, url, res) {
   if (url.pathname === "/api/health") {
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/wechat/jssdk-config") {
+    await handleWechatJssdkConfig(req, url, res);
     return;
   }
 
@@ -253,6 +261,109 @@ async function handleApi(req, url, res) {
   }
 
   sendJson(res, 404, { ok: false, error: "接口不存在" });
+}
+
+async function handleWechatJssdkConfig(req, url, res) {
+  loadEnv(path.join(rootDir, ".env"));
+  const appId = String(process.env.WECHAT_APP_ID || "").trim();
+  const appSecret = String(process.env.WECHAT_APP_SECRET || "").trim();
+  if (!appId || !appSecret) {
+    sendJson(res, 503, {
+      ok: false,
+      configured: false,
+      error: "微信语音尚未完成公众号配置，请先配置 WECHAT_APP_ID 和 WECHAT_APP_SECRET。"
+    });
+    return;
+  }
+
+  const pageUrl = normalizeWechatPageUrl(url.searchParams.get("url"));
+  const forwardedHost = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim()
+    .split(":")[0]
+    .toLowerCase();
+  if (!pageUrl || !forwardedHost || pageUrl.hostname.toLowerCase() !== forwardedHost) {
+    sendJson(res, 400, { ok: false, configured: true, error: "微信签名页面地址无效。" });
+    return;
+  }
+
+  try {
+    const ticket = await getWechatJsapiTicket(appId, appSecret);
+    const nonceStr = randomBytes(12).toString("hex");
+    const timestamp = Math.floor(Date.now() / 1000);
+    const canonicalUrl = pageUrl.toString();
+    const signatureSource = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timestamp}&url=${canonicalUrl}`;
+    const signature = createHash("sha1").update(signatureSource).digest("hex");
+    sendJson(res, 200, {
+      ok: true,
+      configured: true,
+      appId,
+      timestamp,
+      nonceStr,
+      signature
+    });
+  } catch (error) {
+    sendJson(res, 502, {
+      ok: false,
+      configured: true,
+      error: publicErrorMessage(error)
+    });
+  }
+}
+
+function normalizeWechatPageUrl(value) {
+  try {
+    const pageUrl = new URL(String(value || ""));
+    if (!/^https?:$/.test(pageUrl.protocol)) return null;
+    pageUrl.hash = "";
+    return pageUrl;
+  } catch {
+    return null;
+  }
+}
+
+async function getWechatJsapiTicket(appId, appSecret) {
+  if (wechatJsapiTicketCache.value && wechatJsapiTicketCache.expiresAt > Date.now()) {
+    return wechatJsapiTicketCache.value;
+  }
+  const accessToken = await getWechatAccessToken(appId, appSecret);
+  const ticketUrl = new URL("https://api.weixin.qq.com/cgi-bin/ticket/getticket");
+  ticketUrl.searchParams.set("access_token", accessToken);
+  ticketUrl.searchParams.set("type", "jsapi");
+  const payload = await fetchWechatJson(ticketUrl, "微信 JSAPI ticket");
+  if (Number(payload.errcode || 0) !== 0 || !payload.ticket) {
+    throw new Error(payload.errmsg || "微信 JSAPI ticket 获取失败");
+  }
+  wechatJsapiTicketCache = {
+    value: String(payload.ticket),
+    expiresAt: Date.now() + Math.max(60, Number(payload.expires_in || 7200) - 300) * 1000
+  };
+  return wechatJsapiTicketCache.value;
+}
+
+async function getWechatAccessToken(appId, appSecret) {
+  if (wechatAccessTokenCache.value && wechatAccessTokenCache.expiresAt > Date.now()) {
+    return wechatAccessTokenCache.value;
+  }
+  const tokenUrl = new URL("https://api.weixin.qq.com/cgi-bin/token");
+  tokenUrl.searchParams.set("grant_type", "client_credential");
+  tokenUrl.searchParams.set("appid", appId);
+  tokenUrl.searchParams.set("secret", appSecret);
+  const payload = await fetchWechatJson(tokenUrl, "微信 access_token");
+  if (payload.errcode || !payload.access_token) {
+    throw new Error(payload.errmsg || "微信 access_token 获取失败");
+  }
+  wechatAccessTokenCache = {
+    value: String(payload.access_token),
+    expiresAt: Date.now() + Math.max(60, Number(payload.expires_in || 7200) - 300) * 1000
+  };
+  return wechatAccessTokenCache.value;
+}
+
+async function fetchWechatJson(url, label) {
+  const response = await fetchWithTimeout(url, {}, 12000, label);
+  if (!response.ok) throw new Error(`${label} HTTP ${response.status}`);
+  return response.json();
 }
 
 async function answerWithAmapV2(question, session = {}, options = {}) {
