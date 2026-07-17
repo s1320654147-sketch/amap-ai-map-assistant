@@ -885,6 +885,43 @@ button {
   font-weight: 600;
 }
 
+.favorites-panel-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.cloud-sync-button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #dbe4ef;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #64748b;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.cloud-sync-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cloud-sync-button.is-synced {
+  border-color: rgba(0, 122, 100, 0.22);
+  background: #edf8f5;
+  color: #007a64;
+}
+
 .favorites-panel-body {
   min-height: 0;
   height: 100%;
@@ -1191,6 +1228,84 @@ button {
   border-color: rgba(0, 122, 100, 0.28);
   background: #ffffff;
   box-shadow: 0 0 0 4px rgba(0, 122, 100, 0.08);
+}
+
+.account-sheet-panel {
+  min-height: min(60dvh, 480px);
+  max-height: min(88dvh, 620px);
+  overflow-y: auto;
+}
+
+.account-sheet-copy {
+  margin: 14px 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.account-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.account-actions {
+  margin-top: 18px;
+}
+
+.account-signed-in {
+  padding: 24px 0 10px;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.account-signed-in[hidden] {
+  display: none !important;
+}
+
+.account-avatar {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #e9f8f3;
+  color: #007a64;
+  font-size: 24px;
+  font-weight: 750;
+}
+
+.account-signed-in strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
+.account-signed-in span,
+.account-signed-in p {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.account-signed-in p {
+  max-width: 360px;
+  margin: 4px 0 10px;
+  line-height: 1.6;
+}
+
+.account-logout {
+  min-height: 42px;
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #64748b;
+  padding: 0 18px;
+  font-size: 14px;
+  font-weight: 650;
 }
 
 .favorite-tag-presets {
@@ -3093,6 +3208,10 @@ body.mobile-page {
     padding-block: 5px;
   }
 
+  body.wechat-voice-unavailable .mobile-voice-row {
+    display: none;
+  }
+
   .mobile-voice-row .mobile-voice-cta {
     flex: 1 1 auto;
     min-width: 0;
@@ -3724,6 +3843,22 @@ body.mobile-page {
   .favorites-panel-count,
   .favorites-panel-eyebrow {
     font-size: clamp(11px, 1.4dvh, 12px);
+  }
+
+  .favorites-panel-actions {
+    gap: 5px;
+  }
+
+  .cloud-sync-button {
+    min-height: 32px;
+    max-width: 132px;
+    padding-inline: 9px;
+  }
+
+  .cloud-sync-button span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .favorites-panel-body {

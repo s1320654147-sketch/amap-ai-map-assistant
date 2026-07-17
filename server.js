@@ -25,6 +25,9 @@ const AMAP_RATE_LIMIT_BACKOFF_MS = Number(process.env.AMAP_RATE_LIMIT_BACKOFF_MS
 const OUTBOUND_FETCH_RETRY_COUNT = Number(process.env.OUTBOUND_FETCH_RETRY_COUNT || 2);
 const OUTBOUND_FETCH_RETRY_BACKOFF_MS = Number(process.env.OUTBOUND_FETCH_RETRY_BACKOFF_MS || 900);
 const SEARCH_COUNT_MAX_PAGES = Number(process.env.SEARCH_COUNT_MAX_PAGES || 20);
+const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const AUTH_ACCESS_COOKIE = "amap_access";
+const AUTH_REFRESH_COOKIE = "amap_refresh";
 let nextAmapRequestAt = 0;
 let amapQueue = Promise.resolve();
 let wechatAccessTokenCache = { value: "", expiresAt: 0 };
@@ -69,6 +72,17 @@ async function handleApi(req, url, res) {
 
   if (url.pathname === "/api/wechat/jssdk-config") {
     await handleWechatJssdkConfig(req, url, res);
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/auth/") || url.pathname === "/api/cloud-favorites") {
+    try {
+      await handleAccountApi(req, url, res);
+    } catch (error) {
+      const message = accountPublicErrorMessage(error);
+      const status = /邮箱|密码|登录|credentials|confirmed/i.test(String(error?.message || error)) ? 401 : 502;
+      sendJson(res, status, { ok: false, error: message });
+    }
     return;
   }
 
@@ -261,6 +275,246 @@ async function handleApi(req, url, res) {
   }
 
   sendJson(res, 404, { ok: false, error: "接口不存在" });
+}
+
+async function handleAccountApi(req, url, res) {
+  const config = getSupabaseConfig();
+  if (!config) {
+    if (url.pathname === "/api/auth/session") {
+      sendJson(res, 200, { ok: true, configured: false, authenticated: false, user: null });
+      return;
+    }
+    sendJson(res, 503, { ok: false, configured: false, error: "云同步服务尚未配置。" });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/signup" || url.pathname === "/api/auth/login") {
+    const body = await readJsonBody(req);
+    const email = String(body.email || "").trim().toLowerCase();
+    const password = String(body.password || "");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      sendJson(res, 400, { ok: false, error: "请输入有效邮箱地址。" });
+      return;
+    }
+    if (password.length < 8) {
+      sendJson(res, 400, { ok: false, error: "密码至少需要 8 位。" });
+      return;
+    }
+    const signup = url.pathname.endsWith("/signup");
+    const endpoint = signup ? "/auth/v1/signup" : "/auth/v1/token?grant_type=password";
+    const payload = await supabaseRequest(config, endpoint, {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+    const session = payload.session || payload;
+    if (session.access_token && session.refresh_token) {
+      setAuthCookies(req, res, session);
+      sendJson(res, 200, { ok: true, user: publicSupabaseUser(payload.user || session.user) });
+      return;
+    }
+    sendJson(res, 202, {
+      ok: true,
+      verificationRequired: true,
+      message: "账号已创建，请先到邮箱完成确认，然后回来登录。"
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/logout") {
+    const session = await getSupabaseSession(req, res, config, { optional: true });
+    if (session?.accessToken) {
+      await supabaseRequest(config, "/auth/v1/logout", {
+        method: "POST",
+        accessToken: session.accessToken
+      }).catch(() => {});
+    }
+    clearAuthCookies(req, res);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const session = await getSupabaseSession(req, res, config, { optional: true });
+  if (url.pathname === "/api/auth/session") {
+    sendJson(res, 200, {
+      ok: true,
+      configured: true,
+      authenticated: Boolean(session?.user),
+      user: publicSupabaseUser(session?.user)
+    });
+    return;
+  }
+
+  if (!session?.user) {
+    sendJson(res, 401, { ok: false, error: "请先登录后再同步收藏。" });
+    return;
+  }
+
+  if (url.pathname === "/api/cloud-favorites" && req.method === "GET") {
+    const rows = await supabaseRequest(
+      config,
+      "/rest/v1/map_favorites?select=id,payload,deleted,updated_at&order=updated_at.desc",
+      { accessToken: session.accessToken }
+    );
+    sendJson(res, 200, {
+      ok: true,
+      favorites: Array.isArray(rows)
+        ? rows.map((row) => ({
+            ...(row.payload && typeof row.payload === "object" ? row.payload : {}),
+            id: String(row.id || ""),
+            deleted: Boolean(row.deleted),
+            updatedAt: row.updated_at || row.payload?.updatedAt || ""
+          }))
+        : []
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/cloud-favorites" && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    const changes = Array.isArray(body.changes) ? body.changes.slice(0, 500) : [];
+    if (!changes.length) {
+      sendJson(res, 200, { ok: true, synced: 0 });
+      return;
+    }
+    const rows = changes
+      .map((item) => {
+        const id = String(item?.id || "").trim();
+        if (!id) return null;
+        const deleted = Boolean(item.deleted);
+        const updatedAt = validIsoDate(item.updatedAt) || new Date().toISOString();
+        return {
+          user_id: session.user.id,
+          id,
+          payload: deleted ? null : item,
+          deleted,
+          updated_at: updatedAt
+        };
+      })
+      .filter(Boolean);
+    await supabaseRequest(config, "/rest/v1/map_favorites?on_conflict=user_id,id", {
+      method: "POST",
+      accessToken: session.accessToken,
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal,missing=default" },
+      body: JSON.stringify(rows)
+    });
+    sendJson(res, 200, { ok: true, synced: rows.length });
+    return;
+  }
+
+  sendJson(res, 405, { ok: false, error: "不支持的账号操作。" });
+}
+
+function getSupabaseConfig() {
+  loadEnv(path.join(rootDir, ".env"));
+  const url = String(process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY || "").trim();
+  return url && key ? { url, key } : null;
+}
+
+async function supabaseRequest(config, endpoint, options = {}) {
+  const response = await fetchWithTimeout(`${config.url}${endpoint}`, {
+    method: options.method || "GET",
+    headers: {
+      apikey: config.key,
+      Authorization: options.accessToken ? `Bearer ${options.accessToken}` : `Bearer ${config.key}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    body: options.body
+  }, 15000, "云同步服务");
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    throw new Error(payload.msg || payload.message || payload.error_description || payload.error || `云同步服务 HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+async function getSupabaseSession(req, res, config, { optional = false } = {}) {
+  const cookies = parseCookies(req.headers.cookie);
+  let accessToken = cookies[AUTH_ACCESS_COOKIE] || "";
+  const refreshToken = cookies[AUTH_REFRESH_COOKIE] || "";
+  if (accessToken) {
+    try {
+      const user = await supabaseRequest(config, "/auth/v1/user", { accessToken });
+      return { accessToken, refreshToken, user };
+    } catch {
+      accessToken = "";
+    }
+  }
+  if (refreshToken) {
+    try {
+      const refreshed = await supabaseRequest(config, "/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        body: JSON.stringify({ refresh_token: refreshToken })
+      });
+      setAuthCookies(req, res, refreshed);
+      return { accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token, user: refreshed.user };
+    } catch {
+      clearAuthCookies(req, res);
+    }
+  }
+  if (optional) return null;
+  throw new Error("登录状态已失效，请重新登录。");
+}
+
+function setAuthCookies(req, res, session) {
+  const secure = requestIsSecure(req);
+  const accessMaxAge = Math.max(60, Number(session.expires_in || 3600) - 30);
+  res.setHeader("Set-Cookie", [
+    serializeCookie(AUTH_ACCESS_COOKIE, session.access_token, { maxAge: accessMaxAge, secure }),
+    serializeCookie(AUTH_REFRESH_COOKIE, session.refresh_token, { maxAge: AUTH_COOKIE_MAX_AGE, secure })
+  ]);
+}
+
+function clearAuthCookies(req, res) {
+  const secure = requestIsSecure(req);
+  res.setHeader("Set-Cookie", [
+    serializeCookie(AUTH_ACCESS_COOKIE, "", { maxAge: 0, secure }),
+    serializeCookie(AUTH_REFRESH_COOKIE, "", { maxAge: 0, secure })
+  ]);
+}
+
+function serializeCookie(name, value, { maxAge, secure }) {
+  return `${name}=${encodeURIComponent(String(value || ""))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
+}
+
+function parseCookies(header = "") {
+  return String(header || "").split(";").reduce((cookies, item) => {
+    const index = item.indexOf("=");
+    if (index <= 0) return cookies;
+    const key = item.slice(0, index).trim();
+    try {
+      cookies[key] = decodeURIComponent(item.slice(index + 1).trim());
+    } catch {
+      cookies[key] = "";
+    }
+    return cookies;
+  }, {});
+}
+
+function requestIsSecure(req) {
+  return String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+}
+
+function publicSupabaseUser(user) {
+  if (!user) return null;
+  return { id: String(user.id || ""), email: String(user.email || "") };
+}
+
+function validIsoDate(value) {
+  const date = new Date(String(value || ""));
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function accountPublicErrorMessage(error) {
+  const raw = String(error?.message || error || "");
+  if (/Invalid login credentials/i.test(raw)) return "邮箱或密码不正确。";
+  if (/Email not confirmed/i.test(raw)) return "请先到邮箱完成确认。";
+  if (/already registered|already been registered/i.test(raw)) return "这个邮箱已经注册，请直接登录。";
+  if (/rate limit/i.test(raw)) return "操作太频繁，请稍后再试。";
+  if (/登录状态|refresh token|JWT/i.test(raw)) return "登录状态已失效，请重新登录。";
+  return publicErrorMessage(error);
 }
 
 async function handleWechatJssdkConfig(req, url, res) {

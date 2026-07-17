@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
     <title>高德 AI 地图助手</title>
-    <link rel="stylesheet" href="/styles.css?v=20260715-voice-presence" />
+    <link rel="icon" href="/assets/amap-logo.png" type="image/png" />
+    <link rel="stylesheet" href="/styles.css?v=20260717-cloud-sync" />
   </head>
   <body>
     <div class="app-status-banner" id="appStatusBanner" role="status" aria-live="polite" hidden>
@@ -212,7 +213,16 @@
             <p class="favorites-panel-eyebrow">私人地理知识库</p>
             <h2>我的收藏</h2>
           </div>
-          <span class="favorites-panel-count" id="favoritesCount">0 个地点</span>
+          <div class="favorites-panel-actions">
+            <span class="favorites-panel-count" id="favoritesCount">0 个地点</span>
+            <button class="cloud-sync-button" id="cloudSyncButton" type="button" aria-label="登录并开启云端收藏同步">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 18h10a4 4 0 0 0 .6-7.9A6 6 0 0 0 6.2 8.4 4.8 4.8 0 0 0 7 18Z" />
+                <path d="m9.5 13 2.5 2.5 3.5-4" />
+              </svg>
+              <span id="cloudSyncStatus">检查同步状态</span>
+            </button>
+          </div>
         </header>
         <div class="favorites-tag-filter" id="favoritesTagFilter" aria-label="收藏标签筛选"></div>
         <div class="favorites-panel-body" id="favoritesList"></div>
@@ -266,6 +276,41 @@
       </button>
     </nav>
 
+    <div class="note-sheet-backdrop account-sheet" id="accountSheet" hidden aria-hidden="true">
+      <div class="note-sheet-panel account-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="accountSheetTitle">
+        <div class="note-sheet-grabber" aria-hidden="true"></div>
+        <div class="note-sheet-head">
+          <div>
+            <p class="note-sheet-eyebrow">收藏云同步</p>
+            <h3 id="accountSheetTitle">账号与设备同步</h3>
+          </div>
+          <button class="note-sheet-close" id="accountSheetClose" type="button" aria-label="关闭">×</button>
+        </div>
+        <div id="accountSignedOut">
+          <p class="account-sheet-copy">首次登录后会长期保持登录。本机收藏会自动与云端合并，不影响未登录时的使用。</p>
+          <label class="account-field">
+            <span>邮箱</span>
+            <input id="accountEmail" type="email" autocomplete="email" inputmode="email" placeholder="name@example.com" />
+          </label>
+          <label class="account-field">
+            <span>密码</span>
+            <input id="accountPassword" type="password" minlength="8" autocomplete="current-password" placeholder="至少 8 位" />
+          </label>
+          <div class="note-sheet-actions account-actions">
+            <button class="note-sheet-skip" id="accountSignup" type="button">创建账号</button>
+            <button class="note-sheet-save" id="accountLogin" type="button">登录并同步</button>
+          </div>
+        </div>
+        <div class="account-signed-in" id="accountSignedIn" hidden>
+          <div class="account-avatar" aria-hidden="true">✓</div>
+          <strong>收藏已在云端同步</strong>
+          <span id="accountUserEmail"></span>
+          <p>这个浏览器会长期保持登录。其他手机或浏览器只需首次登录一次。</p>
+          <button class="account-logout" id="accountLogout" type="button">退出当前设备</button>
+        </div>
+      </div>
+    </div>
+
     <div class="note-sheet-backdrop" id="favoriteNoteSheet" hidden>
       <div class="note-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="favoriteNoteTitle">
         <div class="note-sheet-grabber" aria-hidden="true"></div>
@@ -292,6 +337,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260715-wechat-voice" type="module"></script>
+    <script src="/app.js?v=20260717-cloud-sync" type="module"></script>
   </body>
 </html>

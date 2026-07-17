@@ -44,6 +44,18 @@ const els = {
   favoritesList: $("#favoritesList"),
   favoritesCount: $("#favoritesCount"),
   favoritesTagFilter: $("#favoritesTagFilter"),
+  cloudSyncButton: $("#cloudSyncButton"),
+  cloudSyncStatus: $("#cloudSyncStatus"),
+  accountSheet: $("#accountSheet"),
+  accountSheetClose: $("#accountSheetClose"),
+  accountEmail: $("#accountEmail"),
+  accountPassword: $("#accountPassword"),
+  accountLogin: $("#accountLogin"),
+  accountSignup: $("#accountSignup"),
+  accountSignedIn: $("#accountSignedIn"),
+  accountSignedOut: $("#accountSignedOut"),
+  accountUserEmail: $("#accountUserEmail"),
+  accountLogout: $("#accountLogout"),
   searchPanel: $("#searchPanel"),
   searchPanelForm: $("#searchPanelForm"),
   searchPanelInput: $("#searchPanelInput"),
@@ -73,6 +85,7 @@ const FILTERS = {
 
 const RANKING_CITY_NAMES = new Set(["上海", "上海市"]);
 const FAVORITES_STORAGE_KEY = "amap_favorites";
+const FAVORITES_TOMBSTONES_KEY = "amap_favorite_tombstones";
 const GUIDE_STORAGE_KEY = "amap_guided";
 const VOICE_HOLD_CANCEL_THRESHOLD = 52;
 const VOICE_CLICK_SUPPRESSION_MS = 680;
@@ -151,6 +164,16 @@ const state = {
   favoriteDraft: null,
   favoriteTagFilter: "",
   favorites: [],
+  favoriteTombstones: {},
+  account: {
+    configured: false,
+    authenticated: false,
+    loading: true,
+    syncing: false,
+    user: null,
+    syncTimer: 0,
+    lastSyncedAt: ""
+  },
   viewport: {
     stableHeight: 0,
     keyboardOpen: false
@@ -290,6 +313,7 @@ async function init() {
   renderContext();
   renderFavoritesPanel();
   renderSearchPanel();
+  void initCloudAccount();
   updateChatMode();
   syncVoiceModeUI();
   showFirstVisitGuide();
@@ -470,6 +494,14 @@ function bindEvents() {
   els.favoriteNoteSheet?.addEventListener("click", (event) => {
     if (event.target === els.favoriteNoteSheet) closeFavoriteNoteSheet();
   });
+  els.cloudSyncButton?.addEventListener("click", openAccountSheet);
+  els.accountSheetClose?.addEventListener("click", closeAccountSheet);
+  els.accountSheet?.addEventListener("click", (event) => {
+    if (event.target === els.accountSheet) closeAccountSheet();
+  });
+  els.accountLogin?.addEventListener("click", () => void submitAccountForm("login"));
+  els.accountSignup?.addEventListener("click", () => void submitAccountForm("signup"));
+  els.accountLogout?.addEventListener("click", () => void logoutCloudAccount());
   els.appStatusBannerAction?.addEventListener("click", async () => {
     const action = state.app.statusAction;
     if (typeof action !== "function") return;
@@ -511,6 +543,8 @@ function loadFavorites() {
     const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
     const favorites = JSON.parse(raw || "[]");
     state.favorites = Array.isArray(favorites) ? favorites.filter(Boolean).map(normalizeFavoriteRecord) : [];
+    const tombstones = JSON.parse(localStorage.getItem(FAVORITES_TOMBSTONES_KEY) || "{}");
+    state.favoriteTombstones = tombstones && typeof tombstones === "object" ? tombstones : {};
     state.app.storageAvailable = true;
   } catch {
     state.favorites = [];
@@ -525,6 +559,7 @@ function loadFavorites() {
 function saveFavorites() {
   try {
     localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(state.favorites));
+    localStorage.setItem(FAVORITES_TOMBSTONES_KEY, JSON.stringify(state.favoriteTombstones));
     state.app.storageAvailable = true;
     return true;
   } catch {
@@ -535,6 +570,205 @@ function saveFavorites() {
     });
     return false;
   }
+}
+
+async function initCloudAccount() {
+  state.account.loading = true;
+  updateCloudAccountUI();
+  try {
+    const payload = await accountApi("/api/auth/session");
+    state.account.configured = payload.configured !== false;
+    state.account.authenticated = Boolean(payload.authenticated);
+    state.account.user = payload.user || null;
+    if (state.account.authenticated) await syncFavoritesWithCloud({ pull: true });
+  } catch (error) {
+    state.account.configured = !/尚未配置/.test(String(error?.message || error));
+    state.account.authenticated = false;
+    state.account.user = null;
+  } finally {
+    state.account.loading = false;
+    updateCloudAccountUI();
+  }
+}
+
+function openAccountSheet() {
+  if (!els.accountSheet) return;
+  els.accountSheet.hidden = false;
+  els.accountSheet.setAttribute("aria-hidden", "false");
+  updateCloudAccountUI();
+  if (!state.account.authenticated) requestAnimationFrame(() => els.accountEmail?.focus());
+}
+
+function closeAccountSheet() {
+  if (!els.accountSheet) return;
+  els.accountSheet.hidden = true;
+  els.accountSheet.setAttribute("aria-hidden", "true");
+  if (els.accountPassword) els.accountPassword.value = "";
+}
+
+async function submitAccountForm(mode) {
+  if (!state.account.configured) {
+    showToast("云同步服务尚未配置");
+    return;
+  }
+  const email = cleanText(els.accountEmail?.value).toLowerCase();
+  const password = String(els.accountPassword?.value || "");
+  if (!email || !password) {
+    showToast("请输入邮箱和密码");
+    return;
+  }
+  setAccountFormBusy(true);
+  try {
+    const payload = await accountApi(`/api/auth/${mode}`, {
+      method: "POST",
+      body: JSON.stringify({ email, password })
+    });
+    if (payload.verificationRequired) {
+      showToast(payload.message || "请先到邮箱完成确认");
+      return;
+    }
+    state.account.authenticated = true;
+    state.account.user = payload.user || { email };
+    if (els.accountPassword) els.accountPassword.value = "";
+    await syncFavoritesWithCloud({ pull: true });
+    updateCloudAccountUI();
+    showToast(mode === "signup" ? "账号已创建，收藏已同步" : "登录成功，收藏已同步");
+  } catch (error) {
+    showToast(accountErrorMessage(error));
+  } finally {
+    setAccountFormBusy(false);
+  }
+}
+
+async function logoutCloudAccount() {
+  setAccountFormBusy(true);
+  try {
+    await accountApi("/api/auth/logout", { method: "POST" });
+  } catch {
+    // The local account state should still be cleared if the remote logout is unavailable.
+  } finally {
+    state.account.authenticated = false;
+    state.account.user = null;
+    state.account.lastSyncedAt = "";
+    setAccountFormBusy(false);
+    updateCloudAccountUI();
+    showToast("已退出账号，本机收藏仍然保留");
+  }
+}
+
+function setAccountFormBusy(busy) {
+  [els.accountLogin, els.accountSignup, els.accountLogout].forEach((button) => {
+    if (button) button.disabled = busy;
+  });
+}
+
+function updateCloudAccountUI() {
+  const account = state.account;
+  const label = account.loading
+    ? "检查同步状态"
+    : !account.configured
+      ? "云同步待配置"
+      : account.syncing
+        ? "正在同步"
+        : account.authenticated
+          ? "已云同步"
+          : "仅保存在本机";
+  if (els.cloudSyncStatus) els.cloudSyncStatus.textContent = label;
+  if (els.cloudSyncButton) {
+    els.cloudSyncButton.classList.toggle("is-synced", account.authenticated);
+    els.cloudSyncButton.setAttribute("aria-label", account.authenticated ? "管理云端收藏同步" : "登录并开启云端收藏同步");
+  }
+  if (els.accountSignedIn) els.accountSignedIn.hidden = !account.authenticated;
+  if (els.accountSignedOut) els.accountSignedOut.hidden = account.authenticated;
+  if (els.accountUserEmail) els.accountUserEmail.textContent = account.user?.email || "";
+}
+
+function scheduleCloudFavoritesSync() {
+  if (!state.account.authenticated || !state.account.configured) return;
+  window.clearTimeout(state.account.syncTimer);
+  state.account.syncTimer = window.setTimeout(() => void syncFavoritesWithCloud(), 500);
+}
+
+async function syncFavoritesWithCloud({ pull = false } = {}) {
+  if (!state.account.authenticated || state.account.syncing || !state.app.online) return;
+  state.account.syncing = true;
+  updateCloudAccountUI();
+  try {
+    if (pull) {
+      const payload = await accountApi("/api/cloud-favorites");
+      mergeCloudFavoriteChanges(Array.isArray(payload.favorites) ? payload.favorites : []);
+    }
+    const changes = [
+      ...state.favorites.map((favorite) => ({ ...favorite, deleted: false })),
+      ...Object.entries(state.favoriteTombstones).map(([id, updatedAt]) => ({ id, updatedAt, deleted: true }))
+    ];
+    await accountApi("/api/cloud-favorites", {
+      method: "PUT",
+      body: JSON.stringify({ changes })
+    });
+    state.account.lastSyncedAt = new Date().toISOString();
+  } catch (error) {
+    if (/登录|401/.test(String(error?.message || error))) {
+      state.account.authenticated = false;
+      state.account.user = null;
+    }
+    showToast("收藏云同步暂时失败，本机数据仍然安全");
+  } finally {
+    state.account.syncing = false;
+    updateCloudAccountUI();
+  }
+}
+
+function mergeCloudFavoriteChanges(cloudChanges) {
+  const localFavorites = new Map(state.favorites.map((favorite) => [favorite.id, favorite]));
+  for (const cloud of cloudChanges) {
+    const id = cleanText(cloud?.id);
+    if (!id) continue;
+    const cloudTime = Date.parse(cloud.updatedAt || "") || 0;
+    const local = localFavorites.get(id);
+    const localTime = Math.max(
+      Date.parse(local?.updatedAt || local?.savedAt || "") || 0,
+      Date.parse(state.favoriteTombstones[id] || "") || 0
+    );
+    if (localTime > cloudTime) continue;
+    if (cloud.deleted) {
+      localFavorites.delete(id);
+      state.favoriteTombstones[id] = cloud.updatedAt || new Date().toISOString();
+    } else {
+      localFavorites.set(id, normalizeFavoriteRecord(cloud));
+      delete state.favoriteTombstones[id];
+    }
+  }
+  state.favorites = [...localFavorites.values()].sort(
+    (left, right) => (Date.parse(right.updatedAt || "") || 0) - (Date.parse(left.updatedAt || "") || 0)
+  );
+  saveFavorites();
+  renderFavoritesPanel();
+  renderSearchPanel();
+  syncFavoriteButtons();
+  renderFavoriteMarkers();
+}
+
+async function accountApi(path, options = {}) {
+  const response = await fetchWithTimeout(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  }, 20000, "账号服务");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || `账号服务 HTTP ${response.status}`);
+  return payload;
+}
+
+function accountErrorMessage(error) {
+  const text = String(error?.message || error || "");
+  if (/Invalid login credentials/i.test(text)) return "邮箱或密码不正确";
+  if (/already registered|already been registered/i.test(text)) return "这个邮箱已经注册，请直接登录";
+  if (/Email not confirmed/i.test(text)) return "请先到邮箱完成确认";
+  if (/rate limit/i.test(text)) return "操作太频繁，请稍后再试";
+  return text || "账号操作没有完成，请稍后重试";
 }
 
 function syncViewportHeight() {
@@ -1755,6 +1989,7 @@ function isFavoriteId(id) {
 function dispatchFavoritesChanged() {
   const persisted = saveFavorites();
   window.dispatchEvent(new CustomEvent("favorites-changed", { detail: { favorites: state.favorites } }));
+  scheduleCloudFavoritesSync();
   return persisted;
 }
 
@@ -1771,10 +2006,12 @@ function toggleFavoriteRecord(record) {
   const normalized = normalizeFavoriteRecord(record);
   const index = state.favorites.findIndex((favorite) => favorite.id === normalized.id);
   if (index >= 0) {
+    state.favoriteTombstones[normalized.id] = new Date().toISOString();
     state.favorites.splice(index, 1);
     dispatchFavoritesChanged();
     return false;
   }
+  delete state.favoriteTombstones[normalized.id];
   state.favorites.unshift(normalized);
   dispatchFavoritesChanged();
   return true;
@@ -1794,6 +2031,7 @@ function saveFavoriteRecord(record, note = "") {
   if (index >= 0) {
     state.favorites.splice(index, 1);
   }
+  delete state.favoriteTombstones[merged.id];
   state.favorites.unshift(merged);
   dispatchFavoritesChanged();
   return merged;
@@ -2414,7 +2652,6 @@ function initVoiceInput() {
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
   state.voice.canRequestMicrophone = Boolean(navigator.mediaDevices?.getUserMedia) || isWeChatBrowser();
   if (isWeChatBrowser()) {
-    updateVoiceButtons();
     void initWeChatVoiceInput();
     return;
   }
@@ -2494,7 +2731,6 @@ async function initWeChatVoiceInput({ force = false } = {}) {
   updateVoiceButtons();
   wechatVoiceInitPromise = (async () => {
     try {
-      await loadWeChatJssdk();
       const signedUrl = window.location.href.split("#")[0];
       const response = await fetchWithTimeout(
         `/api/wechat/jssdk-config?url=${encodeURIComponent(signedUrl)}`,
@@ -2504,6 +2740,7 @@ async function initWeChatVoiceInput({ force = false } = {}) {
       );
       const config = await response.json().catch(() => ({}));
       if (!response.ok || !config.ok) throw new Error(config.error || "微信语音签名获取失败");
+      await loadWeChatJssdk();
       await configureWeChatJssdk(config);
       state.voice.provider = "wechat-jssdk";
       state.voice.permissionState = "granted";
@@ -3989,7 +4226,15 @@ function restoreVoiceDraft() {
 
 function updateVoiceButtons() {
   const buttons = [els.voiceInputButton, els.mobileVoiceButton, els.inlineVoiceButton, els.mobileInlineVoiceButton];
-  const voiceAvailable = state.voice.supported || state.voice.canRequestMicrophone || isWeChatBrowser();
+  const wechatVoiceUnavailable =
+    isWeChatBrowser() &&
+    !state.voice.supported &&
+    !state.voice.wechatLoading &&
+    Boolean(state.voice.wechatConfigError);
+  const voiceAvailable =
+    !wechatVoiceUnavailable &&
+    (state.voice.supported || state.voice.canRequestMicrophone || isWeChatBrowser());
+  document.body.classList.toggle("wechat-voice-unavailable", wechatVoiceUnavailable);
   if (els.mobileKeyboardButton) {
     els.mobileKeyboardButton.hidden = !(isMobileViewport() && voiceAvailable);
     els.mobileKeyboardButton.disabled = state.chat.isAsking;

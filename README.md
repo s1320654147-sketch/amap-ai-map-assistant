@@ -18,11 +18,15 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 WECHAT_APP_ID=你的微信公众号或服务号AppID
 WECHAT_APP_SECRET=你的微信公众号或服务号AppSecret
+SUPABASE_URL=https://你的项目.supabase.co
+SUPABASE_PUBLISHABLE_KEY=你的Supabase Publishable Key
 PORT=5177
 AMAP_MIN_INTERVAL_MS=350
 ```
 
 微信内置浏览器的按住说话使用微信 JS-SDK。除配置上述两个服务端环境变量外，还需要在微信公众平台把正式站点域名加入「JS接口安全域名」。`WECHAT_APP_SECRET` 只能保存在服务端或部署平台 Secret 中，不能写入前端代码。
+
+账号与云端收藏使用 Supabase Auth + Postgres。创建 Supabase 项目后，在 SQL Editor 执行 `supabase/schema.sql`，再把项目 URL 和 Publishable Key 配置到 Render。登录状态通过服务端 HttpOnly Cookie 长期保持；未登录时仍使用浏览器本地收藏。
 
 5. 在当前目录运行：
 
